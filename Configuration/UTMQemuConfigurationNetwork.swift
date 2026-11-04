@@ -15,6 +15,9 @@
 //
 
 import Foundation
+#if os(macOS)
+import Security
+#endif
 
 /// Network settings for a single device.
 struct UTMQemuConfigurationNetwork: Codable, Identifiable {
@@ -189,12 +192,27 @@ extension UTMQemuConfigurationNetwork {
             }
         }
         #if os(macOS)
-        mode = .shared
+        // vmnet (shared and bridged modes) needs com.apple.vm.networking, which builds signed without
+        // Apple's provisioning profile (unsigned or Developer ID only) cannot have
+        mode = Self.hasVMNetworkingEntitlement ? .shared : .emulated
         #else
         mode = .emulated
         #endif
     }
 }
+
+#if os(macOS)
+extension UTMQemuConfigurationNetwork {
+    /// Whether this process is entitled to use vmnet.
+    static let hasVMNetworkingEntitlement: Bool = {
+        guard let task = SecTaskCreateFromSelf(nil) else {
+            return false
+        }
+        let value = SecTaskCopyValueForEntitlement(task, "com.apple.vm.networking" as CFString, nil)
+        return (value as? Bool) == true
+    }()
+}
+#endif
 
 // MARK: - Conversion of old config format
 
