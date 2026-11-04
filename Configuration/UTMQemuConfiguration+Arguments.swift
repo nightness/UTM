@@ -562,6 +562,10 @@ import Virtualization // for getting network interfaces
         isIntelHypervisorGuest && isQ35 && qemu.hasInterruptRemapping
     }
 
+    private var isMemoryLockUsed: Bool {
+        isIntelHypervisorGuest && qemu.hasMemoryLock
+    }
+
     @QEMUArgumentBuilder private var iommuArguments: [QEMUArgument] {
         if isInterruptRemappingUsed {
             f("-device")
@@ -716,6 +720,13 @@ import Virtualization // for getting network interfaces
         f("-m")
         system.memorySize
         f()
+        if isMemoryLockUsed {
+            // Keep guest RAM resident: otherwise the host compresses and swaps it under memory
+            // pressure, and every touch of it faults. Our QEMU locks each RAM mapping on HVF and
+            // only warns if the lock fails.
+            f("-overcommit")
+            f("mem-lock=on")
+        }
     }
     
     var hasCustomBios: Bool {

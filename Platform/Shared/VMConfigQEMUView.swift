@@ -84,6 +84,8 @@ struct VMConfigQEMUView: View {
                     if config.system.architecture == .x86_64 && config.qemu.hasHypervisor {
                         Toggle("Interrupt remapping (x2APIC)", isOn: $config.qemu.hasInterruptRemapping)
                             .help("Adds an Intel IOMMU with interrupt remapping only, so the guest can use x2APIC. Cuts global lock contention and audio dropouts for Windows on Intel Macs. Requires the q35 machine.")
+                        Toggle("Lock guest memory", isOn: $config.qemu.hasMemoryLock)
+                            .help("Keeps the guest's RAM resident so macOS does not compress or swap it. The Mac needs enough free memory for the whole guest.")
                     }
                     #endif
                     Toggle("Use local time for base clock", isOn: $config.qemu.hasRTCLocalTime)
