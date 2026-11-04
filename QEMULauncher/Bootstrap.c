@@ -20,6 +20,7 @@
 #include <sys/event.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 typedef struct {
@@ -83,6 +84,14 @@ static void __attribute__((noreturn)) runQemu(qemu_main_t *funcs, int argc, cons
     } else if (funcs->swtpm_main) {
         funcs->swtpm_main(argc, argv, "swtpm", "socket");
     } else {
+        // The main loop feeds the sound card (HDA DMA and audio timers) and runs virgl. At the
+        // task's default QoS it waits behind the vCPU threads (created in qemu_init, so they keep
+        // the lower class) and a busy guest breaks up the sound. QEMU's own system/main.c does the
+        // same; UTM does not use it. QEMU_MAIN_LOOP_QOS=default keeps the old behaviour.
+        const char *qos = getenv("QEMU_MAIN_LOOP_QOS");
+        if (!qos || strcmp(qos, "default") != 0) {
+            pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+        }
         funcs->qemu_main_loop();
         funcs->qemu_cleanup();
     }
