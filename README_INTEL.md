@@ -47,6 +47,15 @@ is x86_64 and the hypervisor is in use:
   On the test machine this halved lock contention, and audio dropouts under video went from 1 to 6 s
   per 30 s down to none. DMA translation stays off, so devices still use direct DMA. To turn it off,
   clear **QEMU → Tweaks → Interrupt remapping (x2APIC)** in the VM's settings.
+- **CPU clock flags.** With **System → CPU** left at *Default*, UTM still picks the CPU model that
+  matches the Mac's generation, and now adds `+invtsc,-hypervisor`. With an invariant TSC and no
+  hypervisor bit, Windows uses the TSC as its clock instead of reading timers through VM exits. On the
+  test machine, idle host CPU fell from 90% to 53% and a WebGL benchmark went from 42 to 56 fps. If
+  you pick a CPU model yourself, add these flags under *CPU Flags*.
+- **Lock guest memory.** UTM adds `-overcommit mem-lock=on`, which keeps the guest's RAM resident, so
+  macOS doesn't compress or swap it and the guest doesn't stall on page faults. The Mac needs enough
+  free memory for the whole guest. If the lock fails, QEMU logs a warning and the VM still starts. To
+  turn it off, clear **QEMU → Tweaks → Lock guest memory**.
 - **Audio: CoreAudio.** With **Settings → Sound → QEMU sound backend** left at *Default*, these VMs use
   CoreAudio, set to `timer-period=5000,out.frequency=48000,out.buffer-length=5000,out.buffer-count=40`.
   That means 48 kHz with no resampling, 5 ms buffers and a 200 ms ring. Our QEMU's jitter buffer
