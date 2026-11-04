@@ -80,6 +80,12 @@ struct VMConfigQEMUView: View {
                             .help("Only available when Hypervisor is used on supported hardware. TSO speeds up Intel emulation in the guest at the cost of decreased performance in general.")
                             .disabled(!config.system.architecture.hasTSOSupport)
                     }
+                    #if os(macOS) && arch(x86_64)
+                    if config.system.architecture == .x86_64 && config.qemu.hasHypervisor {
+                        Toggle("Interrupt remapping (x2APIC)", isOn: $config.qemu.hasInterruptRemapping)
+                            .help("Adds an Intel IOMMU with interrupt remapping only, so the guest can use x2APIC. Cuts global lock contention and audio dropouts for Windows on Intel Macs. Requires the q35 machine.")
+                    }
+                    #endif
                     Toggle("Use local time for base clock", isOn: $config.qemu.hasRTCLocalTime)
                         .help("If checked, use local time for RTC which is required for Windows. Otherwise, use UTC clock.")
                     Toggle("Force PS/2 controller", isOn: $config.qemu.hasPS2Controller)

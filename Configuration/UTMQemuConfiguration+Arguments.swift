@@ -150,6 +150,7 @@ import Virtualization // for getting network interfaces
         resourceURL
         f()
         f("-S") // startup stopped
+        iommuArguments // must come before the devices it serves
         spiceArguments
         networkArguments
         displayArguments
@@ -522,6 +523,48 @@ import Virtualization // for getting network interfaces
         system.architecture.hasHypervisorSupport && qemu.hasHypervisor
     }
     
+    /// True when this is an x86_64 build running natively on an Intel Mac (not translated by Rosetta).
+    private static let isNativeIntelHost: Bool = {
+        #if os(macOS) && arch(x86_64)
+        var translated: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        if sysctlbyname("sysctl.proc_translated", &translated, &size, nil, 0) == 0 && translated == 1 {
+            return false
+        }
+        return true
+        #else
+        return false
+        #endif
+    }()
+
+    /// An x86_64 guest on Intel HVF, which gets the Windows-on-Intel defaults of this build.
+    private var isIntelHypervisorGuest: Bool {
+        Self.isNativeIntelHost && system.architecture == .x86_64 && isHypervisorUsed
+    }
+
+    private var isQ35: Bool {
+        let target = system.target.rawValue
+        return target == "q35" || target.hasPrefix("pc-q35-")
+    }
+
+    /// Interrupt remapping lets the guest run its local APIC in x2APIC mode, so APIC accesses become
+    /// MSR exits instead of xAPIC MMIO exits that hold the global lock (about 25,000/s under video on an
+    /// i7-7700HQ, which broke up HDA audio). DMA translation stays off, so devices keep direct DMA.
+    private var isInterruptRemappingUsed: Bool {
+        isIntelHypervisorGuest && isQ35 && qemu.hasInterruptRemapping
+    }
+
+    @QEMUArgumentBuilder private var iommuArguments: [QEMUArgument] {
+        if isInterruptRemappingUsed {
+            f("-device")
+            "intel-iommu"
+            "intremap=on"
+            "eim=on"
+            "dma-translation=off"
+            f()
+        }
+    }
+
     private var isTSOUsed: Bool {
         system.architecture.hasTSOSupport && qemu.hasTSO
     }
