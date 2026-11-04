@@ -440,7 +440,15 @@ import Virtualization // for getting network interfaces
                 #if arch(x86_64)
                 if let cpu = highestIntelCPUConfigurationForHost() {
                     f("-cpu")
-                    f(cpu)
+                    cpu
+                    if isIntelHypervisorGuest {
+                        // Without an invariant TSC, and with the hypervisor bit set, Windows does not
+                        // use the TSC as its clock and reads timers through VM exits instead: about
+                        // twice the idle CPU, and 3D at 42 instead of 56 fps on an i7-7700HQ.
+                        "+invtsc"
+                        "-hypervisor"
+                    }
+                    f()
                 }
                 #else
                 f("-cpu")
