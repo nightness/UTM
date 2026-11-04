@@ -51,6 +51,7 @@ usage () {
     echo "  -p platform      Target platform. Default ios. [ios|ios_simulator|ios-tci|ios_simulator-tci|macos|visionos|visionos_simulator]"
     echo "  -a architecture  Target architecture. Default arm64. [armv7|armv7s|arm64|i386|x86_64]"
     echo "  -q qemu_path     Do not download QEMU, use qemu_path instead."
+    echo "  -u components    Only rebuild these comma separated components (qemu,dxmt) into an existing sysroot."
     echo "  -d, --download   Force re-download of source even if already downloaded."
     echo "  -r, --rebuild    Avoid cleaning build directory."
     echo "  -x, --debug      Build for debug."
@@ -172,6 +173,22 @@ clone () {
     retry git -C "$DIR" submodule update --init --recursive --filter=tree:0
 }
 
+# QEMU from a git commit (QEMU_REPO/QEMU_COMMIT in patches/sources) instead of the QEMU_SRC tarball. Only that commit
+# is fetched and the roms/ submodules are skipped; configure downloads the meson subprojects it needs.
+clone_qemu () {
+    DIR="$QEMU_DIR"
+    if [ -d "$DIR/.git" -a -z "$REDOWNLOAD" ] && [ "$(git -C "$DIR" rev-parse HEAD)" == "$QEMU_COMMIT" ]; then
+        echo "${GREEN}$DIR already at $QEMU_COMMIT! Run with -d to force re-download.${NC}"
+        return
+    fi
+    echo "${GREEN}Fetching ${QEMU_REPO} ${QEMU_COMMIT}...${NC}"
+    rm -rf "$DIR"
+    git init -q "$DIR"
+    git -C "$DIR" remote add origin "$QEMU_REPO"
+    retry git -C "$DIR" fetch --depth 1 origin "$QEMU_COMMIT"
+    git -C "$DIR" checkout -q FETCH_HEAD
+}
+
 clone_moltenvk_dependences () {
     REPO="$1"
     NAME="$(basename $REPO)"
@@ -210,7 +227,11 @@ download_all () {
     download $SPICE_CLIENT_SRC
     download $ZSTD_SRC
     download $SLIRP_SRC
-    download $QEMU_SRC
+    if [ -n "$CLONE_QEMU" ]; then
+        clone_qemu
+    elif [ -z "$QEMU_REPO" ]; then
+        download $QEMU_SRC
+    fi
     if [ -z "$SKIP_USB_BUILD" ]; then
         download $USB_SRC
         download $USBREDIR_SRC
@@ -895,9 +916,7 @@ build_vulkan_drivers () {
     patch_vulkan_icd "$PREFIX/share/vulkan/icd.d/MoltenVK_icd.json"
 }
 
-build_d3d_drivers () {
-    LLVM15_NAME=$(basename "${LLVM15_SRC%.tar.*}")
-    cmake_build "$BUILD_DIR/$LLVM15_NAME/llvm" -DLLVM_ENABLE_ZSTD=Off -DLLVM_TARGETS_TO_BUILD="" -DLLVM_BUILD_TOOLS=Off -DLLVM_VERSION_PRINTER_SHOW_HOST_TARGET_INFO=Off -DLLVM_ENABLE_TERMINFO=Off
+build_dxmt () {
     (
         case $PLATFORM in
         ios* )
@@ -919,6 +938,12 @@ build_d3d_drivers () {
         MESON_CROSS_SUFFIX="-dxmt"
         meson_darwin_build $DXMT_REPO -Dnative_llvm_path="$PREFIX"
     )
+}
+
+build_d3d_drivers () {
+    LLVM15_NAME=$(basename "${LLVM15_SRC%.tar.*}")
+    cmake_build "$BUILD_DIR/$LLVM15_NAME/llvm" -DLLVM_ENABLE_ZSTD=Off -DLLVM_TARGETS_TO_BUILD="" -DLLVM_BUILD_TOOLS=Off -DLLVM_VERSION_PRINTER_SHOW_HOST_TARGET_INFO=Off -DLLVM_ENABLE_TERMINFO=Off
+    build_dxmt
     if [ "$ARCH" == "x86_64" -a "$PLATFORM" == "macos" ]; then
         meson_build $D3DMETAL_REPO -Dtests=disabled
         # used by install_d3dmetal.sh to rebind D3DMetal's private imports to
@@ -952,6 +977,7 @@ ARCH=
 REBUILD=
 QEMU_DIR=
 REDOWNLOAD=
+UPDATE=
 PLATFORM_FAMILY_NAME=
 while [ "x$1" != "x" ]; do
     case $1 in
@@ -964,6 +990,10 @@ while [ "x$1" != "x" ]; do
         ;;
     -r | --rebuild )
         REBUILD=y
+        ;;
+    -u | --update )
+        UPDATE="$2"
+        shift
         ;;
     -q | --qemu )
         QEMU_DIR="$2"
@@ -1096,7 +1126,10 @@ PATCHES_DIR="$BASEDIR/../patches"
 # Include URL list
 source "$PATCHES_DIR/sources"
 
-if [ -z "$QEMU_DIR" ]; then
+if [ -z "$QEMU_DIR" -a -n "$QEMU_REPO" ]; then
+    QEMU_DIR="$BUILD_DIR/$(basename "$QEMU_REPO" .git)"
+    CLONE_QEMU=y
+elif [ -z "$QEMU_DIR" ]; then
     FILE="$(basename $QEMU_SRC)"
     QEMU_DIR="$BUILD_DIR/${FILE%.tar.*}"
 elif [ ! -d "$QEMU_DIR" ]; then
@@ -1173,6 +1206,58 @@ export LDFLAGS
 # declares its own prototype and misses the 27.0 SDK availability attribute.
 export ac_cv_func_pipe2=no
 export ac_cv_func_dup3=no
+
+# -u: rebuild only the listed components (qemu, dxmt) into an existing, complete sysroot, for example one
+# staged from UTM's CI Sysroot artifact, then repackage the frameworks. It needs only Xcode, meson, ninja and
+# Homebrew's pkg-config, not the full check_env toolset.
+if [ -n "$UPDATE" ]; then
+    if [ ! -d "$PREFIX/Frameworks" ]; then
+        echo "${RED}Error, -u needs an existing sysroot in $PREFIX.${NC}"
+        exit 1
+    fi
+    echo "${GREEN}Updating ${UPDATE} in ${PLATFORM_FAMILY_NAME} ${ARCH} sysroot [${NCPU} jobs]${NC}"
+    [ -d "$BUILD_DIR" ] || mkdir -p "$BUILD_DIR"
+    # a sysroot staged from elsewhere records its own prefix in the pkg-config files
+    for PC in "$PREFIX"/lib/pkgconfig/*.pc "$PREFIX"/share/pkgconfig/*.pc; do
+        [ -f "$PC" ] || continue
+        OLD_PREFIX="$(sed -n 's/^prefix=//p' "$PC" | head -1)"
+        case "$OLD_PREFIX" in
+        "$PREFIX" | "" | '${'* ) ;;
+        * ) sed -i '' "s|$OLD_PREFIX|$PREFIX|g" "$PC" ;;
+        esac
+    done
+    if [ -x "$PREFIX/host/bin/pkg-config" ]; then
+        export PATH="$PREFIX/host/bin:$PATH"
+        export PKG_CONFIG="$PREFIX/host/bin/pkg-config"
+    else
+        export PKG_CONFIG="$(brew --prefix)/bin/pkg-config"
+    fi
+    export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig"
+    unset PKG_CONFIG_PATH
+    for COMPONENT in ${UPDATE//,/ }; do
+        case $COMPONENT in
+        qemu )
+            if [ -n "$CLONE_QEMU" ]; then
+                clone_qemu
+            elif [ -z "$REBUILD" ]; then
+                download $QEMU_SRC
+            fi
+            build $QEMU_DIR --cross-prefix="" $QEMU_PLATFORM_BUILD_FLAGS $QEMU_DEBUG_FLAGS
+            ;;
+        dxmt )
+            clone $DXMT_REPO $DXMT_COMMIT
+            build_dxmt
+            ;;
+        * )
+            echo "${RED}Unknown component for -u: $COMPONENT${NC}"
+            exit 1
+            ;;
+        esac
+    done
+    fixup_all
+    echo "${GREEN}Update done!${NC}"
+    exit 0
+fi
 
 check_env
 echo "${GREEN}Starting build for ${PLATFORM_FAMILY_NAME} ${ARCH} [${NCPU} jobs]${NC}"

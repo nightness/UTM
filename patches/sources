@@ -24,6 +24,12 @@ USB_SRC="https://github.com/libusb/libusb/releases/download/v1.0.25/libusb-1.0.2
 USBREDIR_SRC="https://www.spice-space.org/download/usbredir/usbredir-0.14.0.tar.xz"
 SLIRP_SRC="https://github.com/utmapp/libslirp/releases/download/v4.9.1-release-mirror/libslirp-v4.9.1.tar.gz"
 QEMU_SRC="https://github.com/utmapp/qemu/releases/download/v10.0.12-utm/qemu-10.0.12-utm.tar.xz"
+# Unofficial Intel Mac build: QEMU comes from this repository and commit instead of QEMU_SRC. It is
+# utmapp/qemu utm-edition 2934963 (which already carries qemu-10.0.12-utm.patch except the arm64-host-only
+# in-kernel GICv3 commits) plus the Windows-on-Intel fixes (vTPM PPI, HVF no-EXEC for GPU blobs, VGA until
+# scanout, HDA pacing, CoreAudio jitter buffer). Unset QEMU_REPO to go back to the tarball and patch.
+QEMU_REPO="https://github.com/nightness/qemu.git"
+QEMU_COMMIT="f2d0fbe7e30daa567c22c57d69b95cc7b0f659a7" # branch utm-win11
 
 # Source files for spice-client
 JSON_GLIB_SRC="https://download.gnome.org/sources/json-glib/1.10/json-glib-1.10.0.tar.xz"
@@ -52,8 +58,9 @@ MESA_COMMIT="eed3e1d9bff9eb38890e0f241e87846cdd729fdf"
 MOLTENVK_REPO="https://github.com/utmapp/MoltenVK.git"
 MOLTENVK_COMMIT="b5680e33d7dca891667adea0b4c35ffe905d1a66"
 LLVM15_SRC="https://github.com/llvm/llvm-project/releases/download/llvmorg-15.0.7/llvm-project-15.0.7.src.tar.xz"
-DXMT_REPO="https://github.com/utmapp/dxmt.git"
-DXMT_COMMIT="8b9d33470d6417734bf156d87d265ca2ede0aaa8"
+# utmapp/dxmt 8b9d334 + the x86_64 ms_abi calling convention and Mac2 R32Sint caps fixes (utmapp/dxmt#1, #2)
+DXMT_REPO="https://github.com/nightness/dxmt.git"
+DXMT_COMMIT="586242981abe074d9be3d17b657997a31f5e91cf" # branch intel-mac-native
 D3DMETAL_REPO="https://github.com/utmapp/d3dmetal-native.git"
 D3DMETAL_COMMIT="af1ee1710711fadff41dead87960d0f1336c1047"
 
