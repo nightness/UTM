@@ -15,7 +15,9 @@
 # Environment:
 #   SIGN_IDENTITY   codesign identity (default: Developer ID Application: Joshua Guyette (WT957SC7MJ))
 #   TEAM_ID         team for the application group (default: WT957SC7MJ)
-#   BUNDLE_PREFIX   bundle identifier prefix (default: com.nightness.utm-intel)
+#   BUNDLE_PREFIX   bundle identifier prefix (default: com.nightness). TEAM_ID.BUNDLE_PREFIX.UTM is the
+#                   application group, and virglrenderer's shared memory names start with it: it
+#                   must be at most 28 characters, or every 3D context fails
 #   NOTARY_PROFILE  notarytool keychain profile (default: notary)
 #   OUTPUT          output directory (default: <repo>/out-intel)
 #   SYSROOT_RUN     utmapp/UTM Actions run id to take the Sysroot-macos-x86_64 artifact from
@@ -29,10 +31,15 @@ cd "$BASEDIR"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: Joshua Guyette (WT957SC7MJ)}"
 TEAM_ID="${TEAM_ID:-WT957SC7MJ}"
-BUNDLE_PREFIX="${BUNDLE_PREFIX:-com.nightness.utm-intel}"
+BUNDLE_PREFIX="${BUNDLE_PREFIX:-com.nightness}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-notary}"
 OUTPUT="${OUTPUT:-$BASEDIR/out-intel}"
 STEPS="${STEPS:-deps app sign dmg notarize}"
+APP_GROUP="$TEAM_ID.$BUNDLE_PREFIX.UTM"
+if [ ${#APP_GROUP} -gt 28 ]; then
+    echo "Application group $APP_GROUP is ${#APP_GROUP} characters; at most 28 fit in a shared memory name" >&2
+    exit 1
+fi
 SYSROOT="sysroot-macOS-x86_64"
 VERSION="$(sed -n 's/^MARKETING_VERSION = //p' Build.xcconfig)"
 ARCHIVE="$OUTPUT/UTM.xcarchive"

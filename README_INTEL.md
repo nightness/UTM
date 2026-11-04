@@ -12,7 +12,7 @@ Patcher). Version numbers follow upstream with an `-intel.N` suffix, for example
 ## What is different from UTM
 
 **Signing and app identity.** The app is signed with Josh Guyette's Developer ID (team
-`WT957SC7MJ`). Its bundle identifiers start with `com.nightness.utm-intel` instead of `com.utmapp`, so
+`WT957SC7MJ`). Its bundle identifiers start with `com.nightness` instead of `com.utmapp`, so
 it has its own settings, VM list and sandbox container. It can be installed next to the official UTM.
 To use a VM you already have, open its `.utm` file in this app. Don't run the same VM in both apps
 at once.
