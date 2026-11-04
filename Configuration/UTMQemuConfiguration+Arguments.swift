@@ -730,6 +730,11 @@ import Virtualization // for getting network interfaces
     private var soundBackend: UTMQEMUSoundBackend {
         let value = UserDefaults.standard.integer(forKey: "QEMUSoundBackend")
         if let backend = UTMQEMUSoundBackend(rawValue: value), backend != .qemuSoundBackendMax {
+            // on Intel HVF, Default means CoreAudio: SPICE audio goes through the UTM process and
+            // GStreamer, while the CoreAudio backend has a jitter buffer for main loop stalls
+            if backend == .qemuSoundBackendDefault && isIntelHypervisorGuest {
+                return .qemuSoundBackendCoreAudio
+            }
             return backend
         } else {
             return .qemuSoundBackendDefault
@@ -776,7 +781,16 @@ import Virtualization // for getting network interfaces
         if useCoreAudioBackend {
             f("-audiodev")
             "coreaudio"
-            f("id=audio1")
+            "id=audio1"
+            if isIntelHypervisorGuest {
+                // 48 kHz end to end (no resampling), 5 ms timer and buffers, 40 buffers (200 ms ring):
+                // the jitter buffer starts at half the ring, which rides out main loop stalls
+                "timer-period=5000"
+                "out.frequency=48000"
+                "out.buffer-length=5000"
+                "out.buffer-count=40"
+            }
+            f()
         }
         f("-audiodev")
         "spice"
