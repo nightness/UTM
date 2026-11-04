@@ -6,7 +6,7 @@ developers (Turing Software, LLC).** Report problems with this build at
 [nightness/UTM](https://github.com/nightness/UTM/issues), not on utmapp/UTM.
 
 It is UTM tuned for running Windows 11 x64 on Intel Macs with the Apple Hypervisor (HVF). It was
-developed and tested on a 2017 MacBook Pro (i7-7700HQ, Radeon Pro 560, macOS 15 via OpenCore Legacy
+developed and tested on a 2017 MacBook Pro (i7-7700HQ, Radeon Pro 555, macOS 15 via OpenCore Legacy
 Patcher). Version numbers follow upstream with an `-intel.N` suffix, for example `5.0.8-intel.1`.
 
 ## What is different from UTM
