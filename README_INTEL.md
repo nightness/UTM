@@ -92,6 +92,12 @@ to Emulated VLAN.
    With interrupt remapping available, Windows may switch to x2APIC on its own. The setting is
    harmless either way and makes sure the guest uses it.
 
+### Starting in full screen
+
+To have the VM's window go full screen every time the VM starts, turn on **Display → Start in full
+screen** in the VM's settings. Upstream UTM only restores full screen for VMs whose display resizes
+through the SPICE guest agent.
+
 ### Letting Windows control the Mac's power
 
 With **QEMU → Tweaks → Guest controls power** on (it's off by default), Windows' power settings
