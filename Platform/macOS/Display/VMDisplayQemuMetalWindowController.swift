@@ -159,15 +159,6 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
             displaySizeDidChange(size: vmDisplay.displaySize)
         }
         super.enterLive()
-        // "Start in full screen": once per window, the first time the VM goes live
-        if displayConfig?.isFullScreenAtStart == true && !hasEnteredFullScreenAtStart {
-            hasEnteredFullScreenAtStart = true
-            DispatchQueue.main.async { [weak self] in
-                if let self = self, let window = self.window, !self.isFullScreen && !window.styleMask.contains(.fullScreen) {
-                    window.toggleFullScreen(self)
-                }
-            }
-        }
         setControl(.resize, isEnabled: false) // disable item
         if isWindowFocusAutoCapture {
             captureMouse()
@@ -323,6 +314,21 @@ extension VMDisplayQemuMetalWindowController {
             }
             if shouldSaveResolution {
                 self.saveDynamicResolution()
+            }
+            self.enterFullScreenAtStartIfNeeded(window)
+        }
+    }
+
+    /// "Start in full screen": once per window, after the guest display has a size and the window
+    /// has been sized to it. Entering full screen before the display is attached leaves it blank.
+    private func enterFullScreenAtStartIfNeeded(_ window: NSWindow) {
+        guard displayConfig?.isFullScreenAtStart == true, !hasEnteredFullScreenAtStart, vmDisplay != nil else {
+            return
+        }
+        hasEnteredFullScreenAtStart = true
+        DispatchQueue.main.async { [weak self] in
+            if let self = self, !self.isFullScreen && !window.styleMask.contains(.fullScreen) {
+                window.toggleFullScreen(self)
             }
         }
     }
