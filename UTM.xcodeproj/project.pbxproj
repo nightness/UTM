@@ -5985,9 +5985,9 @@
 		};
 		84A0A8862A47D5C50038F329 /* XCRemoteSwiftPackageReference "QEMUKit" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/utmapp/QEMUKit.git";
+			repositoryURL = "https://github.com/nightness/QEMUKit.git";
 			requirement = {
-				branch = main;
+				branch = "utm-intel";
 				kind = branch;
 			};
 		};

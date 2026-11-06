@@ -60,6 +60,10 @@ struct UTMQemuConfigurationQEMU: Codable {
 
     /// Lock guest RAM in host memory (`-overcommit mem-lock=on`) for x86_64 guests on Intel HVF.
     var hasMemoryLock: Bool = true
+
+    /// Let the guest's power state drive the Mac: guest sleep (ACPI S3) is allowed, and the Mac's
+    /// display follows the guest's display and sleep state.
+    var hasGuestPowerControl: Bool = false
     
     /// QEMU machine property that overrides the default property defined by UTM.
     var machinePropertyOverride: String?
@@ -100,6 +104,7 @@ struct UTMQemuConfigurationQEMU: Codable {
         case hasPS2Controller = "PS2Controller"
         case hasInterruptRemapping = "InterruptRemapping"
         case hasMemoryLock = "MemoryLock"
+        case hasGuestPowerControl = "GuestPowerControl"
         case machinePropertyOverride = "MachinePropertyOverride"
         case additionalArguments = "AdditionalArguments"
     }
@@ -120,6 +125,7 @@ struct UTMQemuConfigurationQEMU: Codable {
         hasPS2Controller = try values.decode(Bool.self, forKey: .hasPS2Controller)
         hasInterruptRemapping = try values.decodeIfPresent(Bool.self, forKey: .hasInterruptRemapping) ?? true
         hasMemoryLock = try values.decodeIfPresent(Bool.self, forKey: .hasMemoryLock) ?? true
+        hasGuestPowerControl = try values.decodeIfPresent(Bool.self, forKey: .hasGuestPowerControl) ?? false
         machinePropertyOverride = try values.decodeIfPresent(String.self, forKey: .machinePropertyOverride)
         additionalArguments = try values.decode([QEMUArgument].self, forKey: .additionalArguments)
         if let dataURL = decoder.userInfo[.dataURL] as? URL {
@@ -142,6 +148,7 @@ struct UTMQemuConfigurationQEMU: Codable {
         try container.encode(hasPS2Controller, forKey: .hasPS2Controller)
         try container.encode(hasInterruptRemapping, forKey: .hasInterruptRemapping)
         try container.encode(hasMemoryLock, forKey: .hasMemoryLock)
+        try container.encode(hasGuestPowerControl, forKey: .hasGuestPowerControl)
         try container.encodeIfPresent(machinePropertyOverride, forKey: .machinePropertyOverride)
         try container.encode(additionalArguments, forKey: .additionalArguments)
     }

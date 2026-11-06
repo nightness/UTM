@@ -55,6 +55,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, weak, nullable) id<UTMSpiceIODelegate> delegate;
 @property (nonatomic, readonly) BOOL isConnected;
 @property (nonatomic, nullable) LogHandler_t logHandler;
+/// Called on the main queue when the guest power channel (com.utmapp.power.0) opens, and with nil when it closes
+@property (nonatomic, copy, nullable) void (^powerPortHandler)(CSPort * _Nullable port);
 
 - (instancetype)init NS_UNAVAILABLE;
 - (instancetype)initWithSocketUrl:(NSURL *)socketUrl options:(UTMSpiceIOOptions)options NS_DESIGNATED_INITIALIZER;

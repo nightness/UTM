@@ -280,6 +280,9 @@ NSString *const kUTMErrorDomain = @"com.utmapp.utm";
             [self.connectDelegate qemuInterface:self didCreateGuestAgentPort:qemuPort];
 #endif
         }
+        if ([port.name isEqualToString:@"com.utmapp.power.0"] && self.powerPortHandler) {
+            self.powerPortHandler(port);
+        }
         if ([port.name isEqualToString:@"com.utmapp.terminal.0"]) {
             self.primarySerial = port;
         }
@@ -295,6 +298,9 @@ NSString *const kUTMErrorDomain = @"com.utmapp.utm";
         if ([port.name isEqualToString:@"org.qemu.monitor.qmp.0"]) {
         }
         if ([port.name isEqualToString:@"org.qemu.guest_agent.0"]) {
+        }
+        if ([port.name isEqualToString:@"com.utmapp.power.0"] && self.powerPortHandler) {
+            self.powerPortHandler(nil);
         }
         if ([port.name hasPrefix:@"com.utmapp.terminal."]) {
             [self.mutableSerials removeObject:port];

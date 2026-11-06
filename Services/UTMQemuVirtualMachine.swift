@@ -16,7 +16,15 @@
 
 import Foundation
 import QEMUKit
+#if !WITH_USB
+import CocoaSpiceNoUsb
+#else
+import CocoaSpice
+#endif
 #if os(macOS)
+import AppKit
+import IOKit
+import IOKit.pwr_mgt
 import SwiftPortmap
 import Virtualization
 #endif
@@ -92,6 +100,14 @@ final class UTMQemuVirtualMachine: UTMSpiceVirtualMachine {
         
         didSet {
             delegate?.virtualMachine(self, didTransitionToState: state)
+            #if os(macOS)
+            if let powerMirror = powerMirror {
+                let state = state
+                Task { @MainActor in
+                    powerMirror.vmStateDidChange(state)
+                }
+            }
+            #endif
         }
     }
     
@@ -154,6 +170,11 @@ final class UTMQemuVirtualMachine: UTMSpiceVirtualMachine {
     private var startTask: Task<Void, any Error>?
     
     private var swtpm: UTMSWTPM?
+
+    #if os(macOS)
+    /// Drives the Mac's power from the guest's, when the VM has "Guest controls power" on
+    private var powerMirror: UTMGuestPowerMirror?
+    #endif
     
     private var changeCursorRequestInProgress: Bool = false
 
@@ -449,6 +470,17 @@ extension UTMQemuVirtualMachine {
                 }
                 system?.logging?.writeLine(line)
             }
+            #if os(macOS)
+            if await config.isGuestPowerControlUsed {
+                let powerMirror = await UTMGuestPowerMirror(vm: self)
+                self.powerMirror = powerMirror
+                ioService.powerPortHandler = { [weak powerMirror] port in
+                    Task { @MainActor in
+                        powerMirror?.setPowerPort(port)
+                    }
+                }
+            }
+            #endif
             try ioService.start()
             interface = ioService
             spicePublicKey = nil
@@ -830,6 +862,14 @@ extension UTMQemuVirtualMachine: QEMUVirtualMachineDelegate {
         #endif
         swtpm?.stop()
         swtpm = nil
+        #if os(macOS)
+        if let powerMirror = powerMirror {
+            self.powerMirror = nil
+            Task { @MainActor in
+                powerMirror.invalidate()
+            }
+        }
+        #endif
         ioService = nil
         ioServiceDelegate = nil
         pipeInterface?.disconnect()
@@ -839,6 +879,26 @@ extension UTMQemuVirtualMachine: QEMUVirtualMachineDelegate {
         state = .stopped
     }
     
+    func qemuVMDidSuspend(_ qemuVM: QEMUVirtualMachine) {
+        #if os(macOS)
+        if let powerMirror = powerMirror {
+            Task { @MainActor in
+                powerMirror.guestDidSuspend()
+            }
+        }
+        #endif
+    }
+
+    func qemuVMDidWakeup(_ qemuVM: QEMUVirtualMachine) {
+        #if os(macOS)
+        if let powerMirror = powerMirror {
+            Task { @MainActor in
+                powerMirror.guestDidWakeup()
+            }
+        }
+        #endif
+    }
+
     func qemuVM(_ qemuVM: QEMUVirtualMachine, didError error: Error) {
         delegate?.virtualMachine(self, didErrorWithMessage: error.localizedDescription)
     }
@@ -1171,3 +1231,257 @@ extension UTMQemuVirtualMachineError: LocalizedError {
         }
     }
 }
+
+// MARK: - Guest power mirroring
+#if os(macOS)
+/// Lets the guest's power settings drive the Mac (QEMU > Tweaks > "Guest controls power")
+///
+/// While the guest is awake, UTM holds power assertions so the Mac's own idle timers never fire
+/// and the guest's timers decide. When the guest turns its display off (reported by the UTM power
+/// helper over `com.utmapp.power.0`), the Mac's display sleeps; when it turns it back on, the Mac's
+/// display wakes. Guest sleep (ACPI S3) is handled too, for when it works: the assertions are
+/// released and the display sleeps, a suspended guest is woken when the Mac's display or the Mac
+/// wakes, and the guest is asked to sleep before the Mac does.
+@MainActor
+final class UTMGuestPowerMirror {
+    private weak var vm: UTMQemuVirtualMachine?
+    private var isVMRunning = false
+    private var isGuestSuspended = false
+    private var isGuestDisplayOn = true
+    private var displayAssertion = IOPMAssertionID(0)
+    private var systemAssertion = IOPMAssertionID(0)
+    private var observers: [NSObjectProtocol] = []
+    private var powerPort: UTMQemuPort?
+    private var pendingData = Data()
+    private var hasHeardFromHelper = false
+    private var helperCheckTask: Task<Void, Never>?
+
+    /// Whether the VM can sleep (ACPI S3); suspend and wakeup are handled for when it can
+    private static let isGuestSleepSupported = false
+
+    /// How long after the VM starts to wait for the guest helper before offering to install it
+    private static let helperCheckDelay: UInt64 = 120 * NSEC_PER_SEC
+
+    init(vm: UTMQemuVirtualMachine) {
+        self.vm = vm
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.screensDidWakeNotification, NSWorkspace.didWakeNotification] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    self?.hostDidWake()
+                }
+            })
+        }
+        observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.hostWillSleep()
+            }
+        })
+    }
+
+    /// Release everything; called when the VM stops
+    func invalidate() {
+        let center = NSWorkspace.shared.notificationCenter
+        observers.forEach { center.removeObserver($0) }
+        observers = []
+        powerPort = nil
+        helperCheckTask?.cancel()
+        helperCheckTask = nil
+        isVMRunning = false
+        updateAssertions()
+    }
+
+    func vmStateDidChange(_ state: UTMVirtualMachineState) {
+        isVMRunning = state == .started
+        if !isVMRunning {
+            isGuestSuspended = false
+        }
+        updateAssertions()
+        if isVMRunning && helperCheckTask == nil {
+            helperCheckTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: Self.helperCheckDelay)
+                guard !Task.isCancelled else {
+                    return
+                }
+                await self?.offerHelperIfMissing()
+            }
+        }
+    }
+
+    // MARK: Guest events
+
+    func guestDidSuspend() {
+        logger.debug("guest power: guest suspended")
+        isGuestSuspended = true
+        updateAssertions()
+        sleepHostDisplay()
+    }
+
+    func guestDidWakeup() {
+        logger.debug("guest power: guest woke up")
+        isGuestSuspended = false
+        isGuestDisplayOn = true
+        updateAssertions()
+    }
+
+    func setPowerPort(_ port: CSPort?) {
+        pendingData = Data()
+        guard let port = port else {
+            powerPort = nil
+            // without the helper we cannot know, so keep the display awake as before
+            isGuestDisplayOn = true
+            updateAssertions()
+            return
+        }
+        let qemuPort = UTMQemuPort(from: port)
+        qemuPort.readDataHandler = { [weak self] data in
+            Task { @MainActor in
+                self?.receive(data)
+            }
+        }
+        powerPort = qemuPort
+    }
+
+    private func receive(_ data: Data) {
+        hasHeardFromHelper = true
+        pendingData.append(data)
+        while let newline = pendingData.firstIndex(of: UInt8(ascii: "\n")) {
+            let line = String(decoding: pendingData[pendingData.startIndex..<newline], as: UTF8.self)
+            pendingData.removeSubrange(pendingData.startIndex...newline)
+            handle(line.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        if pendingData.count > 1024 {
+            pendingData = Data()
+        }
+    }
+
+    private func handle(_ message: String) {
+        switch message {
+        case "display off":
+            logger.debug("guest power: guest display off")
+            isGuestDisplayOn = false
+            updateAssertions()
+            sleepHostDisplay()
+        case "display on":
+            logger.debug("guest power: guest display on")
+            let wasOff = !isGuestDisplayOn
+            isGuestDisplayOn = true
+            updateAssertions()
+            if wasOff {
+                wakeHostDisplay()
+            }
+        default:
+            logger.debug("guest power: ignoring '\(message)'")
+        }
+    }
+
+    // MARK: Helper setup
+
+    /// The guest has not reported its display state: insert the UTM Power Helper CD and tell the user
+    ///
+    /// The helper needs the VirtIO serial driver, which is also what lets UTM talk to the guest at
+    /// all, so it cannot be installed from here. The CD's installer adds the driver and the guest
+    /// agent if they are missing, then the helper.
+    private func offerHelperIfMissing() async {
+        guard let vm = vm, isVMRunning, !isGuestSuspended, !hasHeardFromHelper else {
+            return
+        }
+        guard let isoURL = Bundle.main.url(forResource: "UTMPowerHelper", withExtension: "iso") else {
+            logger.error("guest power: UTMPowerHelper.iso is missing from the app")
+            return
+        }
+        let message: String
+        do {
+            let externalDrives = await vm.registryEntry.externalDrives
+            if !externalDrives.values.contains(where: { $0.path == isoURL.path }) {
+                guard let drive = await vm.config.drives.last(where: { $0.isExternal && $0.imageURL == nil && externalDrives[$0.id] == nil }) else {
+                    throw UTMDownloadSupportToolsTaskError.driveUnavailable
+                }
+                try await vm.changeMedium(drive, to: isoURL)
+            }
+            message = NSLocalizedString("\"Guest controls power\" is on, but the UTM Power Helper is not running in the guest, so the Mac cannot follow the guest's screen. The UTM Power Helper CD is now in the VM's CD drive: open it in Windows and run install.cmd. It also installs the VirtIO serial driver and the QEMU guest agent if they are missing.", comment: "UTMGuestPowerMirror")
+        } catch {
+            message = String.localizedStringWithFormat(NSLocalizedString("\"Guest controls power\" is on, but the UTM Power Helper is not running in the guest, and its CD could not be inserted: %@", comment: "UTMGuestPowerMirror"), error.localizedDescription)
+        }
+        vm.delegate?.virtualMachine(vm, didErrorWithMessage: message)
+    }
+
+    // MARK: Host events
+
+    private func hostDidWake() {
+        guard isVMRunning && isGuestSuspended, let vm = vm else {
+            return
+        }
+        logger.debug("guest power: host woke, waking the guest")
+        Task {
+            do {
+                try await vm.monitor?.qemuSystemWakeup()
+            } catch {
+                logger.error("guest power: system_wakeup failed: \(error)")
+            }
+        }
+    }
+
+    private func hostWillSleep() {
+        // only useful once the guest can sleep (ACPI S3 is disabled, see isGuestPowerControlUsed)
+        guard Self.isGuestSleepSupported, isVMRunning && !isGuestSuspended, let vm = vm else {
+            return
+        }
+        logger.debug("guest power: host is going to sleep, asking the guest to sleep")
+        Task {
+            // the guest agent does not answer a successful suspend; the SUSPEND event tells us
+            try? await vm.guestAgent?.guestSuspendRAM()
+        }
+    }
+
+    // MARK: Host power
+
+    private func updateAssertions() {
+        let isGuestAwake = isVMRunning && !isGuestSuspended
+        setAssertion(&systemAssertion, type: "PreventUserIdleSystemSleep", on: isGuestAwake)
+        setAssertion(&displayAssertion, type: "PreventUserIdleDisplaySleep", on: isGuestAwake && isGuestDisplayOn)
+    }
+
+    private func setAssertion(_ assertion: inout IOPMAssertionID, type: String, on: Bool) {
+        if on && assertion == 0 {
+            var newAssertion = IOPMAssertionID(0)
+            let result = IOPMAssertionCreateWithName(type as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn), "UTM guest controls power" as CFString, &newAssertion)
+            if result == kIOReturnSuccess {
+                assertion = newAssertion
+            } else {
+                logger.error("guest power: cannot create \(type) assertion: \(result)")
+            }
+        } else if !on && assertion != 0 {
+            IOPMAssertionRelease(assertion)
+            assertion = 0
+        }
+    }
+
+    /// Wake the Mac's display, like any user input would
+    private func wakeHostDisplay() {
+        var assertion = IOPMAssertionID(0)
+        let result = IOPMAssertionDeclareUserActivity("UTM guest display on" as CFString, kIOPMUserActiveLocal, &assertion)
+        if result == kIOReturnSuccess {
+            IOPMAssertionRelease(assertion)
+        } else {
+            logger.error("guest power: cannot wake the display: \(result)")
+        }
+    }
+
+    /// Put the Mac's display to sleep now, like `pmset displaysleepnow`
+    private func sleepHostDisplay() {
+        let wrangler = IORegistryEntryFromPath(kIOMainPortDefault, "IOService:/IOResources/IODisplayWrangler")
+        guard wrangler != 0 else {
+            logger.debug("guest power: no display wrangler on this Mac")
+            return
+        }
+        defer {
+            IOObjectRelease(wrangler)
+        }
+        let result = IORegistryEntrySetCFProperty(wrangler, "IORequestIdle" as CFString, kCFBooleanTrue)
+        if result != kIOReturnSuccess {
+            logger.error("guest power: cannot sleep the display: \(result)")
+        }
+    }
+}
+#endif

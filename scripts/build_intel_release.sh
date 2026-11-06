@@ -91,6 +91,52 @@ step_deps () {
     fi
 }
 
+# The UTM Power Helper CD that "Guest controls power" inserts into Windows guests: the helper, plus
+# the VirtIO serial driver and the QEMU guest agent from the latest stable virtio-win release, which
+# the helper's installer adds if the guest lacks them. The virtio-win ISO is cached in $OUTPUT.
+VIRTIO_WIN_URL="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
+
+make_power_helper_iso () {
+    local cache="$OUTPUT/virtio-win" iso="$OUTPUT/virtio-win/virtio-win.iso"
+    local stage="$OUTPUT/power-helper" out="$APP/Contents/Resources/UTMPowerHelper.iso"
+    mkdir -p "$cache"
+    # re-download when the stable release changes
+    local url
+    url="$(curl -sSIL -o /dev/null -w '%{url_effective}' "$VIRTIO_WIN_URL")" || die "cannot reach virtio-win"
+    if [ "$(cat "$cache/url" 2>/dev/null)" != "$url" ] || [ -f "$iso.part" ]; then
+        say "Downloading $(basename "$url")"
+        local tries=0
+        until curl -fsSL -C - --retry 5 --speed-limit 50000 --speed-time 60 -o "$iso.part" "$url"; do
+            tries=$((tries + 1))
+            [ $tries -lt 20 ] || die "cannot download $url"
+            sleep 5
+        done
+        mv "$iso.part" "$iso"
+        echo "$url" > "$cache/url"
+    fi
+    say "Building UTMPowerHelper.iso"
+    # files copied off the ISO are read-only
+    [ -d "$stage" ] && chmod -R u+w "$stage"
+    rm -rf "$stage"
+    mkdir -p "$stage/vioserial"
+    local mnt
+    mnt="$(hdiutil attach -nobrowse -readonly "$iso" | tail -1 | cut -f3)"
+    [ -d "$mnt/vioserial" ] || { hdiutil detach -quiet "$mnt"; die "no vioserial in $iso"; }
+    for os in w10 w11; do
+        mkdir -p "$stage/vioserial/$os"
+        ditto "$mnt/vioserial/$os/amd64" "$stage/vioserial/$os/amd64"
+    done
+    cp "$mnt/guest-agent/qemu-ga-x86_64.msi" "$stage/"
+    cp "$mnt/virtio-win_license.txt" "$stage/"
+    hdiutil detach -quiet "$mnt"
+    cp guest/windows/utm-power-helper.ps1 guest/windows/install.cmd guest/windows/README.txt "$stage/"
+    rm -f "$out"
+    hdiutil makehybrid -iso -joliet -default-volume-name UTM_POWER_HELPER -o "$out" "$stage" >/dev/null
+    chmod -R u+w "$stage"
+    rm -rf "$stage"
+    [ -f "$out" ] || die "UTMPowerHelper.iso was not created"
+}
+
 step_app () {
     say "Archiving UTM $VERSION for x86_64"
     rm -rf "$ARCHIVE"
@@ -103,6 +149,7 @@ step_app () {
     [ -x "$APP/Contents/XPCServices/QEMUHelper.xpc/Contents/MacOS/QEMURenderServer.app/Contents/MacOS/QEMURenderServer" ] || die "render server missing from the app"
     [ -d "$APP/Contents/Frameworks/qemu-x86_64-softmmu.framework" ] || die "QEMU frameworks missing from the app"
     rm -rf "$ARCHIVE"
+    make_power_helper_iso
 }
 
 # Release entitlements without the ones only an Apple provisioning profile can grant

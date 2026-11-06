@@ -566,6 +566,20 @@ import Virtualization // for getting network interfaces
         isIntelHypervisorGuest && qemu.hasMemoryLock
     }
 
+    /// The guest's power state drives the Mac (see `UTMGuestPowerMirror`): a virtio-serial channel
+    /// carries the guest's display on/off state to UTM.
+    ///
+    /// Guest sleep (ACPI S3) stays disabled: on Intel HVF, resuming a Windows guest with 3D
+    /// acceleration from S3 aborts QEMU (a user-mode SSE store to GPU blob memory that is no longer
+    /// mapped reaches HVF's instruction emulator, which cannot decode it).
+    var isGuestPowerControlUsed: Bool {
+        #if os(macOS)
+        (system.architecture == .x86_64 || system.architecture == .i386) && qemu.hasGuestPowerControl && !isRemoteSpice
+        #else
+        false
+        #endif
+    }
+
     @QEMUArgumentBuilder private var iommuArguments: [QEMUArgument] {
         if isInterruptRemappingUsed {
             f("-device")
@@ -1286,6 +1300,13 @@ import Virtualization // for getting network interfaces
             }
             "id=org.qemu.guest_agent"
             f()
+            if isGuestPowerControlUsed {
+                // The UTM power helper in the guest reports display on/off here
+                f("-device")
+                f("virtserialport,chardev=com.utmapp.power,name=com.utmapp.power.0")
+                f("-chardev")
+                f("spiceport,name=com.utmapp.power.0,id=com.utmapp.power")
+            }
         }
         if isSpiceAgentUsed {
             f("-device")

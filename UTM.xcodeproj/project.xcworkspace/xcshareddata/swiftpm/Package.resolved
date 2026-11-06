@@ -58,10 +58,10 @@
     {
       "identity" : "qemukit",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/utmapp/QEMUKit.git",
+      "location" : "https://github.com/nightness/QEMUKit.git",
       "state" : {
-        "branch" : "main",
-        "revision" : "e8e9e877619d0c68db07ae582f7cfe39063cbcca"
+        "branch" : "utm-intel",
+        "revision" : "3aa0c96842d2715592ecd24175c9198500540e0e"
       }
     },
     {
