@@ -35,6 +35,7 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
     private var displaySize: CGSize = .zero
     private var isDisplaySizeDynamic: Bool = false
     private var isFullScreen: Bool = false
+    private var hasEnteredFullScreenAtStart: Bool = false
     private let minDynamicSize = CGSize(width: 800, height: 600)
     private let resizeDebounceSecs: Double = 1
     private let resizeTimeoutSecs: Double = 5
@@ -158,6 +159,15 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
             displaySizeDidChange(size: vmDisplay.displaySize)
         }
         super.enterLive()
+        // "Start in full screen": once per window, the first time the VM goes live
+        if displayConfig?.isFullScreenAtStart == true && !hasEnteredFullScreenAtStart {
+            hasEnteredFullScreenAtStart = true
+            DispatchQueue.main.async { [weak self] in
+                if let self = self, let window = self.window, !self.isFullScreen && !window.styleMask.contains(.fullScreen) {
+                    window.toggleFullScreen(self)
+                }
+            }
+        }
         setControl(.resize, isEnabled: false) // disable item
         if isWindowFocusAutoCapture {
             captureMouse()

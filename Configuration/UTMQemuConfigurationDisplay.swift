@@ -40,6 +40,9 @@ struct UTMQemuConfigurationDisplay: Codable, Identifiable {
     
     /// If true, use the true (retina) resolution of the display. Otherwise, use the percieved resolution.
     var isNativeResolution: Bool = false
+
+    /// If true, the display's window enters full screen when the VM starts.
+    var isFullScreenAtStart: Bool = false
     
     let id = UUID()
     
@@ -50,6 +53,7 @@ struct UTMQemuConfigurationDisplay: Codable, Identifiable {
         case upscalingFilter = "UpscalingFilter"
         case downscalingFilter = "DownscalingFilter"
         case isNativeResolution = "NativeResolution"
+        case isFullScreenAtStart = "FullScreenAtStart"
     }
     
     init() {
@@ -63,6 +67,7 @@ struct UTMQemuConfigurationDisplay: Codable, Identifiable {
         upscalingFilter = try values.decode(QEMUScaler.self, forKey: .upscalingFilter)
         downscalingFilter = try values.decode(QEMUScaler.self, forKey: .downscalingFilter)
         isNativeResolution = try values.decode(Bool.self, forKey: .isNativeResolution)
+        isFullScreenAtStart = try values.decodeIfPresent(Bool.self, forKey: .isFullScreenAtStart) ?? false
     }
     
     func encode(to encoder: Encoder) throws {
@@ -73,6 +78,7 @@ struct UTMQemuConfigurationDisplay: Codable, Identifiable {
         try container.encode(upscalingFilter, forKey: .upscalingFilter)
         try container.encode(downscalingFilter, forKey: .downscalingFilter)
         try container.encode(isNativeResolution, forKey: .isNativeResolution)
+        try container.encode(isFullScreenAtStart, forKey: .isFullScreenAtStart)
     }
 }
 

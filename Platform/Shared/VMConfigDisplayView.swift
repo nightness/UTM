@@ -60,6 +60,14 @@ struct VMConfigDisplayView: View {
                         Text("Retina Mode")
                     })
                 }
+
+                #if os(macOS)
+                Section(header: Text("Window")) {
+                    Toggle(isOn: $config.isFullScreenAtStart, label: {
+                        Text("Start in full screen")
+                    }).help("Enter full screen every time the VM starts, even without the SPICE guest agent.")
+                }
+                #endif
             }
         }.disableAutocorrection(true)
     }
