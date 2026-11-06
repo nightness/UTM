@@ -92,6 +92,38 @@ to Emulated VLAN.
    With interrupt remapping available, Windows may switch to x2APIC on its own. The setting is
    harmless either way and makes sure the guest uses it.
 
+### Letting Windows control the Mac's power
+
+With **QEMU → Tweaks → Guest controls power** on (it's off by default), Windows' power settings
+decide what the Mac's display does:
+
+- **While Windows is running,** UTM keeps the Mac's own display and sleep timers from firing.
+  Windows' timers are the only ones that count.
+- **When Windows turns its screen off** (Settings → System → Power → *Turn my screen off after*),
+  the Mac's display sleeps too. When Windows' screen comes back on, the Mac's display wakes.
+- **Any key, click or trackpad touch** wakes both.
+- **The Mac doesn't idle-sleep** while the VM runs, since Windows has no Sleep to hand it to (see
+  below). Closing the lid or choosing Sleep still works. When the VM stops, the Mac's own settings
+  apply again.
+
+Windows' *Sleep* (ACPI S3) is still unavailable. On Intel Macs, resuming a Windows VM that uses 3D
+acceleration from S3 crashes QEMU, so UTM keeps S3 off. When it works, UTM is ready for it: the Mac
+will follow Windows to sleep and wake it again.
+
+**The UTM power helper** reports Windows' display state to UTM over a virtio-serial port. If the
+option is on and the helper hasn't checked in two minutes after the VM starts, UTM puts the
+*UTM Power Helper* CD into the VM's empty CD drive and tells you. Open the CD in Windows and
+double-click `install.cmd`. It installs the VirtIO serial driver and the QEMU guest agent if they're
+missing (both from [virtio-win](https://github.com/virtio-win/virtio-win-pkg-scripts)), then the
+helper. The helper installs to `C:\Program Files\UTM Power Helper` and runs as SYSTEM at startup, so
+it also covers the sign-in screen. To remove it, run its `utm-power-helper.ps1 -Uninstall` from an
+Administrator PowerShell. Without the helper, UTM still holds the Mac's timers off, but can't follow Windows' screen.
+
+**No Mac password on wake.** macOS asks for your password when its display wakes if System
+Settings → Lock Screen → *Require password after screen saver begins or display is turned off* is
+set. No app can skip that prompt. To let Windows' own sign-in settings decide, set it to *Never*.
+After the Mac itself has slept, macOS may still ask.
+
 ### Using an existing disk image
 
 A sandboxed app can't open a disk outside the `.utm` bundle, and that includes the backing file of a
