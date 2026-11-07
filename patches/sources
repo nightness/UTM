@@ -58,9 +58,9 @@ MESA_COMMIT="eed3e1d9bff9eb38890e0f241e87846cdd729fdf"
 MOLTENVK_REPO="https://github.com/utmapp/MoltenVK.git"
 MOLTENVK_COMMIT="b5680e33d7dca891667adea0b4c35ffe905d1a66"
 LLVM15_SRC="https://github.com/llvm/llvm-project/releases/download/llvmorg-15.0.7/llvm-project-15.0.7.src.tar.xz"
-# utmapp/dxmt 8b9d334 + the x86_64 ms_abi calling convention and Mac2 R32Sint caps fixes (utmapp/dxmt#1, #2)
+# utmapp/dxmt 8b9d334 + the x86_64 ms_abi calling convention, Mac2 R32Sint caps (utmapp/dxmt#1, #2) and device teardown fixes
 DXMT_REPO="https://github.com/nightness/dxmt.git"
-DXMT_COMMIT="586242981abe074d9be3d17b657997a31f5e91cf" # branch intel-mac-native
+DXMT_COMMIT="0b5b4cc206d689472b24f7a0e64662964920528d" # branch intel-mac-native
 D3DMETAL_REPO="https://github.com/utmapp/d3dmetal-native.git"
 D3DMETAL_COMMIT="af1ee1710711fadff41dead87960d0f1336c1047"
 
