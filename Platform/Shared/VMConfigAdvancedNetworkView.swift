@@ -36,6 +36,10 @@ struct IPConfigurationSection: View {
         Toggle(isOn: $config.isIsolateFromHost, label: {
             Text("Isolate Guest from Host")
         })
+        if config.mode == .emulated {
+            VMConfigConstantPicker("IPv6", selection: $config.vlanIPv6)
+                .help("Automatic offers IPv6 to the guest only when this Mac has a route to the IPv6 internet as the VM starts. Without one, IPv6 connections in the guest hang until they time out instead of falling back to IPv4.")
+        }
         Group {
             DefaultTextField("Guest Network", text: $config.vlanGuestAddress.bound, prompt: "10.0.2.0/24")
                 .keyboardType(.asciiCapable)

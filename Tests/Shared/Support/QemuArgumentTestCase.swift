@@ -25,6 +25,7 @@ import XCTest
 @MainActor class QemuArgumentTestCase: XCTestCase {
     private var savedCapabilities: UTMCapabilities!
     private var savedArguments: [String: Any]!
+    private var savedHostHasIPv6Route: (() -> Bool)!
 
     /// An empty directory standing in for the app's QEMU resources; stage firmware here.
     private(set) var resources: URL!
@@ -36,10 +37,14 @@ import XCTest
         resources = FileManager.default.temporaryDirectory.appendingPathComponent("qemu-resources-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
         UTMQemuConfiguration.resourceURLOverride = resources
+        // the IPv6 VLAN follows the host's routes unless a test pins them
+        savedHostHasIPv6Route = UTMQemuConfigurationNetwork.hostHasIPv6Route
+        UTMQemuConfigurationNetwork.hostHasIPv6Route = { true }
     }
 
     override func tearDownWithError() throws {
         UTMQemuConfiguration.resourceURLOverride = nil
+        UTMQemuConfigurationNetwork.hostHasIPv6Route = savedHostHasIPv6Route
         UTMCapabilities.current = savedCapabilities
         UserDefaults.standard.setVolatileDomain(savedArguments, forName: UserDefaults.argumentDomain)
         try? FileManager.default.removeItem(at: resources)

@@ -39,6 +39,9 @@ struct UTMQemuConfigurationNetwork: Codable, Identifiable {
     /// In bridged mode this is the physical interface to bridge.
     var bridgeInterface: String?
     
+    /// IPv6 on the emulated VLAN.
+    var vlanIPv6: QEMUNetworkIPv6 = .automatic
+
     /// Guest IPv4 for emulated VLAN.
     var vlanGuestAddress: String?
     
@@ -98,6 +101,7 @@ struct UTMQemuConfigurationNetwork: Codable, Identifiable {
         case isIsolateFromHost = "IsolateFromHost"
         case portForward = "PortForward"
         case bridgeInterface = "BridgeInterface"
+        case vlanIPv6 = "VlanIPv6"
         case vlanGuestAddress = "VlanGuestAddress"
         case vlanGuestAddressIPv6 = "VlanGuestAddressIPv6"
         case vlanHostAddress = "VlanHostAddress"
@@ -122,6 +126,7 @@ struct UTMQemuConfigurationNetwork: Codable, Identifiable {
         isIsolateFromHost = try values.decode(Bool.self, forKey: .isIsolateFromHost)
         portForward = try values.decode([UTMQemuConfigurationPortForward].self, forKey: .portForward)
         bridgeInterface = try values.decodeIfPresent(String.self, forKey: .bridgeInterface)
+        vlanIPv6 = try values.decodeIfPresent(QEMUNetworkIPv6.self, forKey: .vlanIPv6) ?? .automatic
         vlanGuestAddress = try values.decodeIfPresent(String.self, forKey: .vlanGuestAddress)
         vlanGuestAddressIPv6 = try values.decodeIfPresent(String.self, forKey: .vlanGuestAddressIPv6)
         vlanHostAddress = try values.decodeIfPresent(String.self, forKey: .vlanHostAddress)
@@ -144,6 +149,9 @@ struct UTMQemuConfigurationNetwork: Codable, Identifiable {
         try container.encode(portForward, forKey: .portForward)
         if mode == .bridged {
             try container.encodeIfPresent(bridgeInterface, forKey: .bridgeInterface)
+        }
+        if mode == .emulated {
+            try container.encode(vlanIPv6, forKey: .vlanIPv6)
         }
         try container.encodeIfPresent(vlanGuestAddress, forKey: .vlanGuestAddress)
         try container.encodeIfPresent(vlanGuestAddressIPv6, forKey: .vlanGuestAddressIPv6)
@@ -171,6 +179,51 @@ extension UTMQemuConfigurationNetwork {
         #else
         return false
         #endif
+    }
+}
+
+// MARK: - IPv6
+
+extension UTMQemuConfigurationNetwork {
+    /// Whether the host has a route to the IPv6 internet. Tests replace it to pin the result.
+    nonisolated(unsafe) static var hostHasIPv6Route: () -> Bool = probeHostIPv6Route
+
+    /// Whether the emulated VLAN offers IPv6 to the guest.
+    ///
+    /// Without IPv6 on the host, an IPv6 VLAN only slows the guest down: SLiRP answers each
+    /// IPv6 connect with an ICMPv6 unreachable, which TCP takes as a soft error, so the guest
+    /// keeps resending its SYN until the connect times out instead of falling back to IPv4.
+    var isIPv6Offered: Bool {
+        switch vlanIPv6 {
+        case .enabled: return true
+        case .disabled: return false
+        case .automatic: return Self.hostHasIPv6Route()
+        }
+    }
+
+    /// Connecting a UDP socket only looks up the route, so this sends nothing.
+    private static func probeHostIPv6Route() -> Bool {
+        let fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP)
+        guard fd >= 0 else {
+            return false
+        }
+        defer {
+            close(fd)
+        }
+        var address = sockaddr_in6()
+        address.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+        address.sin6_family = sa_family_t(AF_INET6)
+        address.sin6_port = in_port_t(53).bigEndian
+        // 2001:4860:4860::8888, a public resolver; any global unicast address would do
+        guard inet_pton(AF_INET6, "2001:4860:4860::8888", &address.sin6_addr) == 1 else {
+            return false
+        }
+        let result = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in6>.size))
+            }
+        }
+        return result == 0
     }
 }
 

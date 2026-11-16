@@ -271,7 +271,8 @@ import XCTest
 
     func testNetworkRecordsAddUpdateAndRemoveByIndex() throws {
         let config = configuration()
-        XCTAssertEqual(config.networks[0].mode, .shared, "the macOS default, so the update below is observable")
+        // not the default, which is emulated in a build without the vmnet entitlement, so the update below is observable
+        config.networks[0].mode = .shared
         let records: [[AnyHashable: Any]] = [
             ["index": 0, "mode": UTMScriptingQemuNetworkMode.emulated.rawValue, "address": "52:54:00:aa:bb:cc"],
             ["mode": UTMScriptingQemuNetworkMode.host.rawValue],

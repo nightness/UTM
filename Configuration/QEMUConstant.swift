@@ -205,6 +205,22 @@ enum QEMUNetworkMode: String, CaseIterable, QEMUConstant {
     }
 }
 
+/// Whether an emulated VLAN offers IPv6 to the guest.
+enum QEMUNetworkIPv6: String, CaseIterable, QEMUConstant {
+    /// IPv6 only when the host has a route to the IPv6 internet when the VM starts.
+    case automatic = "Automatic"
+    case enabled = "Enabled"
+    case disabled = "Disabled"
+
+    var prettyValue: String {
+        switch self {
+        case .automatic: return NSLocalizedString("Automatic", comment: "UTMQemuConstants")
+        case .enabled: return NSLocalizedString("On", comment: "UTMQemuConstants")
+        case .disabled: return NSLocalizedString("Off", comment: "UTMQemuConstants")
+        }
+    }
+}
+
 enum QEMUNetworkProtocol: String, CaseIterable, QEMUConstant {
     case tcp = "TCP"
     case udp = "UDP"

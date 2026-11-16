@@ -24,6 +24,7 @@ import XCTest
 @MainActor final class QemuArgumentsTests: XCTestCase {
     private var savedCapabilities: UTMCapabilities!
     private var savedArguments: [String: Any]!
+    private var savedHostHasIPv6Route: (() -> Bool)!
     private var resources: URL!
 
     override func setUpWithError() throws {
@@ -33,10 +34,14 @@ import XCTest
         resources = FileManager.default.temporaryDirectory.appendingPathComponent("qemu-resources-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
         UTMQemuConfiguration.resourceURLOverride = resources
+        // the IPv6 VLAN follows the host's routes unless a test pins them
+        savedHostHasIPv6Route = UTMQemuConfigurationNetwork.hostHasIPv6Route
+        UTMQemuConfigurationNetwork.hostHasIPv6Route = { true }
     }
 
     override func tearDownWithError() throws {
         UTMQemuConfiguration.resourceURLOverride = nil
+        UTMQemuConfigurationNetwork.hostHasIPv6Route = savedHostHasIPv6Route
         UTMCapabilities.current = savedCapabilities
         UserDefaults.standard.setVolatileDomain(savedArguments, forName: UserDefaults.argumentDomain)
         try FileManager.default.removeItem(at: resources)
@@ -274,6 +279,60 @@ import XCTest
     }
 
     // MARK: Sound and network
+
+    private func emulatedNetdev(_ config: UTMQemuConfiguration) throws -> [String] {
+        let netdev = try XCTUnwrap(arguments(config).value(of: "-netdev", containing: "user"))
+        return QEMUArgumentList.options(netdev)
+    }
+
+    private func emulatedConfiguration(ipv6: QEMUNetworkIPv6) -> UTMQemuConfiguration {
+        let config = configuration(architecture: .x86_64, target: QEMUTarget_x86_64.q35)
+        config.networks[0].mode = .emulated
+        config.networks[0].vlanIPv6 = ipv6
+        config.networks[0].vlanGuestAddressIPv6 = "fd00::/64"
+        config.networks[0].vlanHostAddressIPv6 = "fd00::2"
+        config.networks[0].vlanDnsServerAddressIPv6 = "fd00::3"
+        return config
+    }
+
+    /// With IPv6 off the guest gets no IPv6 address or route, so it uses IPv4 at once instead
+    /// of waiting for IPv6 connects that a host without IPv6 can never complete. QEMU refuses
+    /// the IPv6 addresses along with ipv6=off, so they are left out.
+    func testEmulatedNetworkWithIPv6OffDropsIPv6Options() throws {
+        let options = try emulatedNetdev(emulatedConfiguration(ipv6: .disabled))
+        XCTAssertTrue(options.contains("ipv6=off"), "\(options)")
+        XCTAssertFalse(options.contains { $0.hasPrefix("ipv6-") }, "\(options)")
+    }
+
+    func testEmulatedNetworkWithIPv6OnKeepsIPv6Options() throws {
+        UTMQemuConfigurationNetwork.hostHasIPv6Route = { false }
+        let options = try emulatedNetdev(emulatedConfiguration(ipv6: .enabled))
+        XCTAssertFalse(options.contains("ipv6=off"), "\(options)")
+        XCTAssertTrue(options.contains("ipv6-net=fd00::/64"), "\(options)")
+        XCTAssertTrue(options.contains("ipv6-host=fd00::2"), "\(options)")
+        XCTAssertTrue(options.contains("ipv6-dns=fd00::3"), "\(options)")
+    }
+
+    func testEmulatedNetworkWithAutomaticIPv6FollowsHostRoute() throws {
+        UTMQemuConfigurationNetwork.hostHasIPv6Route = { false }
+        XCTAssertTrue(try emulatedNetdev(emulatedConfiguration(ipv6: .automatic)).contains("ipv6=off"))
+        UTMQemuConfigurationNetwork.hostHasIPv6Route = { true }
+        XCTAssertFalse(try emulatedNetdev(emulatedConfiguration(ipv6: .automatic)).contains("ipv6=off"))
+    }
+
+    /// Configurations saved before the option existed have no key and get Automatic.
+    func testIPv6SettingDecodesAsAutomaticWhenMissing() throws {
+        var network = UTMQemuConfigurationNetwork()
+        network.mode = .emulated
+        network.vlanIPv6 = .disabled
+        let data = try PropertyListEncoder().encode(network)
+        var plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+        XCTAssertEqual(plist["VlanIPv6"] as? String, "Disabled")
+        XCTAssertEqual(try PropertyListDecoder().decode(UTMQemuConfigurationNetwork.self, from: data).vlanIPv6, .disabled)
+        plist.removeValue(forKey: "VlanIPv6")
+        let old = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        XCTAssertEqual(try PropertyListDecoder().decode(UTMQemuConfigurationNetwork.self, from: old).vlanIPv6, .automatic)
+    }
 
     /// A new g3beige machine got the first PPC sound card (sb16, an ISA card) and
     /// network card (eTSEC, an e500 SoC device), neither of which QEMU can attach

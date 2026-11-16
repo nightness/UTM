@@ -1316,16 +1316,21 @@ import Virtualization // for getting network interfaces
                     "nat66-prefix=\(nat66prefix)"
                 }
             } else {
+                // QEMU refuses the IPv6 addresses along with ipv6=off
+                let isIPv6Offered = networks[i].isIPv6Offered
+                if !isIPv6Offered {
+                    "ipv6=off"
+                }
                 if let guestAddress = networks[i].vlanGuestAddress {
                     "net=\(guestAddress)"
                 }
                 if let hostAddress = networks[i].vlanHostAddress {
                     "host=\(hostAddress)"
                 }
-                if let guestAddressIPv6 = networks[i].vlanGuestAddressIPv6 {
+                if isIPv6Offered, let guestAddressIPv6 = networks[i].vlanGuestAddressIPv6 {
                     "ipv6-net=\(guestAddressIPv6)"
                 }
-                if let hostAddressIPv6 = networks[i].vlanHostAddressIPv6 {
+                if isIPv6Offered, let hostAddressIPv6 = networks[i].vlanHostAddressIPv6 {
                     "ipv6-host=\(hostAddressIPv6)"
                 }
                 if let dhcpStartAddress = networks[i].vlanDhcpStartAddress {
@@ -1334,7 +1339,7 @@ import Virtualization // for getting network interfaces
                 if let dnsServerAddress = networks[i].vlanDnsServerAddress {
                     "dns=\(dnsServerAddress)"
                 }
-                if let dnsServerAddressIPv6 = networks[i].vlanDnsServerAddressIPv6 {
+                if isIPv6Offered, let dnsServerAddressIPv6 = networks[i].vlanDnsServerAddressIPv6 {
                     "ipv6-dns=\(dnsServerAddressIPv6)"
                 }
                 if let dnsSearchDomain = networks[i].vlanDnsSearchDomain {
