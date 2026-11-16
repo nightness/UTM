@@ -60,8 +60,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/nightness/QEMUKit.git",
       "state" : {
-        "branch" : "utm-intel",
-        "revision" : "3aa0c96842d2715592ecd24175c9198500540e0e"
+        "branch" : "utm-intel-5.0.9",
+        "revision" : "63876957384f730d3d64c588b44236fd0a2df3da"
       }
     },
     {

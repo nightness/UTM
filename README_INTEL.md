@@ -19,21 +19,17 @@ at once.
 
 **Components:**
 
-- **QEMU:** [nightness/qemu `utm-win11`](https://github.com/nightness/qemu/tree/utm-win11), which
-  is UTM's QEMU (utmapp/qemu `utm-edition`) plus these fixes:
-  - **3D on Intel:** HVF no longer maps GPU blob memory as executable. Without this, Intel HVF
-    rejects the mapping and 3D acceleration fails
-    ([utmapp/UTM#8036](https://github.com/utmapp/UTM/issues/8036)).
-  - **No blank boot screen:** virtio-gpu keeps showing the VGA framebuffer until the Windows driver
-    sets up a real scanout. Before, the screen went blank for about 12 s during boot.
-  - **Steadier audio:** HDA playback pacing and recovery from a full ring, plus a jitter buffer in
-    the CoreAudio backend.
-  - **vTPM:** the TPM PPI region is mapped as a whole page, and `-overcommit mem-lock` works.
-- **DXMT:** [nightness/dxmt `intel-mac-native`](https://github.com/nightness/dxmt/tree/intel-mac-native)
-  is the Direct3D 11 to Metal translator that Windows 3D uses (through Neptune). It has two fixes:
-  - It now uses the Microsoft x64 calling convention, so D3D11 devices no longer hang on x86_64.
-  - It registers the R32Sint format on Mac2-family GPUs, so device creation no longer fails and DWM
-    no longer crash-loops.
+- **QEMU:** UTM's own QEMU (10.0.12 with `patches/qemu-10.0.12-utm.patch`). It now carries the
+  Intel fixes this build used to add itself: HVF no longer maps GPU blob memory as executable
+  ([utmapp/UTM#8036](https://github.com/utmapp/UTM/issues/8036)), virtio-gpu keeps the VGA
+  framebuffer until the Windows driver sets up a real scanout, steadier HDA playback with a jitter
+  buffer in the CoreAudio backend, and `-overcommit mem-lock` on macOS.
+- **libslirp** (emulated networking): 4.9.7 instead of UTM's 4.9.1, for the security fixes in
+  4.9.2 to 4.9.7.
+- **DXMT:** [nightness/dxmt `intel-mac-native-509`](https://github.com/nightness/dxmt/tree/intel-mac-native-509)
+  is UTM's DXMT (which has the x86_64 calling convention and Mac2 R32Sint fixes) plus one fix: a
+  D3D11 device waits for its in-flight command chunks before its pipelines and states are freed,
+  which stops an intermittent render server crash while Windows boots.
 
   Apple's D3DMetal requires Apple silicon, so this build always uses DXMT on Intel. D3D12 is not
   available.
@@ -46,7 +42,7 @@ is x86_64 and the hypervisor is in use:
   mode, so APIC accesses become cheap MSR exits instead of MMIO exits that hold QEMU's global lock.
   On the test machine this halved lock contention, and audio dropouts under video went from 1 to 6 s
   per 30 s down to none. DMA translation stays off, so devices still use direct DMA. To turn it off,
-  clear **QEMU → Tweaks → Interrupt remapping (x2APIC)** in the VM's settings.
+  clear **QEMU → Tweaks → Interrupt remapping** in the VM's settings.
 - **CPU clock flags.** With **System → CPU** left at *Default*, UTM still picks the CPU model that
   matches the Mac's generation, and now adds `+invtsc,-hypervisor`. With an invariant TSC and no
   hypervisor bit, Windows uses the TSC as its clock instead of reading timers through VM exits. On the
@@ -71,6 +67,11 @@ is x86_64 and the hypervisor is in use:
 profile, which this build doesn't have. New VMs therefore default to *Emulated VLAN*, which works for
 normal internet access and port forwarding. An existing VM set to Shared or Bridged must be switched
 to Emulated VLAN.
+
+An Emulated VLAN offers IPv6 to the guest only when the Mac has a route to the IPv6 internet as the VM
+starts (**Network → IPv6**: *Automatic*, the default; *On*; *Off*). Without one, the guest's IPv6
+connections would hang until they time out instead of falling back to IPv4, which makes downloads from
+dual-stack hosts fail intermittently.
 
 ## Windows 11 on an Intel Mac
 
@@ -165,10 +166,9 @@ The script does the following:
    `notary`.
 
 To run only some of these, set `STEPS`, for example `STEPS="sign dmg"`. A full dependency build
-(`build_dependencies.sh -p macos -a x86_64`) also uses our QEMU and DXMT.
+(`build_dependencies.sh -p macos -a x86_64`) also uses our DXMT and libslirp.
 
 ## License
 
 UTM is licensed under the Apache License 2.0, and QEMU under the GPL v2. The source for the QEMU in
-this build is the commit pinned as `QEMU_COMMIT` in `patches/sources`, at
-https://github.com/nightness/qemu.
+this build is UTM's, `QEMU_SRC` in `patches/sources` with `patches/qemu-10.0.12-utm.patch`.

@@ -51,7 +51,7 @@ usage () {
     echo "  -p platform      Target platform. Default ios. [ios|ios_simulator|ios-tci|ios_simulator-tci|macos|visionos|visionos_simulator]"
     echo "  -a architecture  Target architecture. Default arm64. [armv7|armv7s|arm64|i386|x86_64]"
     echo "  -q qemu_path     Do not download QEMU, use qemu_path instead."
-    echo "  -u components    Only rebuild these comma separated components (qemu,dxmt) into an existing sysroot."
+    echo "  -u components    Only rebuild these comma separated components (qemu,dxmt,slirp) into an existing sysroot."
     echo "  -d, --download   Force re-download of source even if already downloaded."
     echo "  -r, --rebuild    Avoid cleaning build directory."
     echo "  -x, --debug      Build for debug."
@@ -1207,7 +1207,7 @@ export LDFLAGS
 export ac_cv_func_pipe2=no
 export ac_cv_func_dup3=no
 
-# -u: rebuild only the listed components (qemu, dxmt) into an existing, complete sysroot, for example one
+# -u: rebuild only the listed components (qemu, dxmt, slirp) into an existing, complete sysroot, for example one
 # staged from UTM's CI Sysroot artifact, then repackage the frameworks. It needs only Xcode, meson, ninja and
 # Homebrew's pkg-config, not the full check_env toolset.
 if [ -n "$UPDATE" ]; then
@@ -1219,7 +1219,8 @@ if [ -n "$UPDATE" ]; then
     [ -d "$BUILD_DIR" ] || mkdir -p "$BUILD_DIR"
     # a sysroot staged from elsewhere records its own prefix in the pkg-config files
     for PC in "$PREFIX"/lib/pkgconfig/*.pc "$PREFIX"/share/pkgconfig/*.pc; do
-        [ -f "$PC" ] || continue
+        # a symlink points at a file the loop edits under its own name
+        [ -f "$PC" -a ! -L "$PC" ] || continue
         OLD_PREFIX="$(sed -n 's/^prefix=//p' "$PC" | head -1)"
         case "$OLD_PREFIX" in
         "$PREFIX" | "" | '${'* ) ;;
@@ -1247,6 +1248,10 @@ if [ -n "$UPDATE" ]; then
         dxmt )
             clone $DXMT_REPO $DXMT_COMMIT
             build_dxmt
+            ;;
+        slirp )
+            download $SLIRP_SRC
+            meson_darwin_build $SLIRP_SRC
             ;;
         * )
             echo "${RED}Unknown component for -u: $COMPONENT${NC}"

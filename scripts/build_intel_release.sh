@@ -5,8 +5,8 @@
 # Run from anywhere on an Apple silicon or Intel Mac with Xcode, Homebrew (meson, ninja, pkg-config,
 # python3) and a Developer ID Application certificate. Steps (STEPS="..." to run a subset):
 #
-#   deps      stage UTM's CI sysroot for macOS x86_64 if there is none, then rebuild QEMU and DXMT into
-#             it from patches/sources (our QEMU and DXMT forks) with build_dependencies.sh -u
+#   deps      stage UTM's CI sysroot for macOS x86_64 if there is none, then rebuild DXMT (our fork) and
+#             libslirp into it from patches/sources with build_dependencies.sh -u; QEMU is UTM's own
 #   app       xcodebuild archive, x86_64 only, with our bundle prefix and team
 #   sign      Developer ID signature with hardened runtime on every nested binary, inside out
 #   dmg       signed DMG
@@ -22,6 +22,7 @@
 #   OUTPUT          output directory (default: <repo>/out-intel)
 #   SYSROOT_RUN     utmapp/UTM Actions run id to take the Sysroot-macos-x86_64 artifact from
 #                   (default: the newest successful Build run on main that has one)
+#   UPDATE_COMPONENTS  what the deps step rebuilds into the sysroot (default: dxmt,slirp)
 #
 set -euo pipefail
 
@@ -83,8 +84,8 @@ step_deps () {
     if [ -z "${PYTHON:-}" ]; then
         export PYTHON="$(brew --prefix)/bin/python3"
     fi
-    say "Rebuilding QEMU and DXMT into $SYSROOT"
-    ./scripts/build_dependencies.sh -p macos -a x86_64 -u qemu,dxmt
+    say "Rebuilding ${UPDATE_COMPONENTS:=dxmt,slirp} into $SYSROOT"
+    ./scripts/build_dependencies.sh -p macos -a x86_64 -u "$UPDATE_COMPONENTS"
     # the QEMU build tree is about 1.6 GB and only needed for incremental rebuilds
     if [ -z "${KEEP_BUILD:-}" ]; then
         rm -rf build-macOS-x86_64/qemu/build build-macOS-x86_64/dxmt.git/utm_build

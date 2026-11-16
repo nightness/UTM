@@ -6948,7 +6948,7 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/nightness/QEMUKit.git";
 			requirement = {
-				branch = "utm-intel";
+				branch = "utm-intel-5.0.9";
 				kind = branch;
 			};
 		};
