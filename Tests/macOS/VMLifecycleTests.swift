@@ -1,0 +1,575 @@
+//
+// Copyright © 2026 Turing Software, LLC. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
+#if os(macOS)
+import AppKit
+import XCTest
+@testable import UTM
+
+/// Starts and stops real QEMU virtual machines inside the app the tests are hosted by.
+///
+/// Each test creates a disposable aarch64 VM with no drives, network or sound, which boots
+/// the bundled EDK2 firmware to its shell in a few seconds under the hypervisor, drives it
+/// through the same `UTMQemuVirtualMachine` calls the app makes, and deletes it. The host
+/// must be a signed build with its own bundle prefix (`scripts/test_utm.sh -v`): the
+/// hypervisor and the app group need the signature, and the unsigned unit-test host skips
+/// every test here.
+@MainActor
+final class VMLifecycleTests: XCTestCase {
+    private static let hostPrefix = UTMTestSupport.testBundlePrefix + "vm."
+    private static let drawTimeout: TimeInterval = 60
+    private static let stopTimeout: TimeInterval = 60
+
+    private var packageDirectory: URL!
+    private var vm: UTMQemuVirtualMachine?
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        let identifier = Bundle.main.bundleIdentifier ?? ""
+        try XCTSkipUnless(identifier.hasPrefix(Self.hostPrefix), "VM tests run in the signed host only (scripts/test_utm.sh -v), not in \(identifier)")
+        try XCTSkipUnless(UTMQemuVirtualMachine.isSupported(systemArchitecture: .aarch64), "this host cannot run aarch64 virtual machines")
+        packageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("VMLifecycleTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: packageDirectory, withIntermediateDirectories: true)
+    }
+
+    override func tearDown() async throws {
+        if let vm = vm, let logURL = vm.config.qemu.debugLogURL, let log = try? String(contentsOf: logURL, encoding: .utf8) {
+            let attachment = XCTAttachment(string: log)
+            attachment.name = "debug.log"
+            add(attachment)
+            if testRun?.hasSucceeded == false, !log.isEmpty {
+                print("--- QEMU debug.log ---\n\(log.suffix(4000))\n--- end ---")
+            }
+        }
+        if let vm = vm {
+            if vm.state != .stopped {
+                try? await vm.stop(usingMethod: .kill)
+                _ = await waitForState(vm, .stopped, timeout: Self.stopTimeout)
+            }
+            UTMRegistry.shared.remove(entry: vm.registryEntry)
+            UTMRegistry.shared.sync()
+        }
+        vm = nil
+        if let packageDirectory = packageDirectory {
+            try? FileManager.default.removeItem(at: packageDirectory)
+        }
+        try await super.tearDown()
+    }
+
+    /// A QEMU aarch64 VM that boots the firmware shell: no drives, no network, no sound, the default
+    /// display, and whatever `configure` adds.
+    private func makeShellVM(additionalArguments: [String] = [], configure: (UTMQemuConfiguration) -> Void = { _ in }) async throws -> UTMQemuVirtualMachine {
+        let config = UTMQemuConfiguration()
+        config.system.architecture = .aarch64
+        config.system.target = QEMUTarget_aarch64.virt
+        config.reset(forArchitecture: .aarch64, target: QEMUTarget_aarch64.virt)
+        config.information.name = "lifecycle"
+        config.drives = []
+        config.networks = []
+        config.sound = []
+        config.qemu.additionalArguments = additionalArguments.map { QEMUArgument($0) }
+        // QEMU's own output lands in Data/debug.log, which a failure attaches
+        config.qemu.hasDebugLog = true
+        configure(config)
+        let vm = try UTMQemuVirtualMachine(newForConfiguration: config, destinationUrl: packageDirectory)
+        try await vm.save()
+        self.vm = vm
+        return vm
+    }
+
+    /// Polls the VM's state until it is `expected` or the timeout passes.
+    private func waitForState(_ vm: UTMQemuVirtualMachine, _ expected: UTMVirtualMachineState, timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if vm.state == expected {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        return vm.state == expected
+    }
+
+    /// Whether every sampled pixel of the image has the same colour; nil for an image without pixels.
+    private static func isUniform(_ image: NSImage) -> Bool? {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return nil
+        }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        let first = bitmap.colorAt(x: 0, y: 0)
+        for y in stride(from: 0, to: bitmap.pixelsHigh, by: max(1, bitmap.pixelsHigh / 40)) {
+            for x in stride(from: 0, to: bitmap.pixelsWide, by: max(1, bitmap.pixelsWide / 40)) where bitmap.colorAt(x: x, y: y) != first {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Asks `source` for screenshots until one shows more than a single colour, which is
+    /// returned, or the timeout passes.
+    private func waitForDrawnScreenshot(timeout: TimeInterval, from source: () async -> UTMVirtualMachineScreenshot?) async throws -> UTMVirtualMachineScreenshot? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            if let screenshot = await source(), try XCTUnwrap(Self.isUniform(screenshot.image), "the screenshot has no pixels") == false {
+                return screenshot
+            }
+            if Date() >= deadline {
+                return nil
+            }
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+    }
+
+    /// Takes screenshots until one shows more than a single colour or the timeout passes.
+    private func waitForDrawnDisplay(_ vm: UTMQemuVirtualMachine, timeout: TimeInterval) async throws -> Bool {
+        try await waitForDrawnScreenshot(timeout: timeout) {
+            _ = await vm.takeScreenshot()
+            return vm.screenshot
+        } != nil
+    }
+
+    /// Start reaches `started`, the display shows something, a forced stop reaches `stopped`.
+    func testStartShowsTheFirmwareAndStopsByForce() async throws {
+        let vm = try await makeShellVM()
+        XCTAssertEqual(vm.state, .stopped)
+        try await vm.start()
+        XCTAssertEqual(vm.state, .started)
+        let drawn = try await waitForDrawnDisplay(vm, timeout: Self.drawTimeout)
+        if let data = vm.screenshot?.pngData {
+            add(XCTAttachment(data: data, uniformTypeIdentifier: "public.png"))
+        }
+        XCTAssertTrue(drawn, "the display stayed a single colour for \(Int(Self.drawTimeout)) s: the firmware did not draw")
+        XCTAssertEqual(vm.state, .started, "the VM stopped on its own")
+        try await vm.stop(usingMethod: .force)
+        let stopped = await waitForState(vm, .stopped, timeout: Self.stopTimeout)
+        XCTAssertTrue(stopped, "the VM is \(vm.state) after a forced stop")
+    }
+
+    /// A VM can be started again after a forced stop.
+    func testStartsAgainAfterAForcedStop() async throws {
+        let vm = try await makeShellVM()
+        for _ in 0..<2 {
+            try await vm.start()
+            XCTAssertEqual(vm.state, .started)
+            try await vm.stop(usingMethod: .force)
+            let stopped = await waitForState(vm, .stopped, timeout: Self.stopTimeout)
+            XCTAssertTrue(stopped, "the VM is \(vm.state) after a forced stop")
+        }
+    }
+
+    /// A QEMU that exits at once (an unknown option) leaves the VM `stopped` with an error
+    /// instead of stuck in `starting`.
+    func testEarlyQemuExitReportsStopped() async throws {
+        let vm = try await makeShellVM(additionalArguments: ["-bogus-option-for-the-test"])
+        do {
+            try await vm.start()
+            XCTFail("starting with an unknown QEMU option did not fail")
+        } catch {
+            // the error names the option; a start that never returns is the regression
+        }
+        XCTAssertEqual(vm.state, .stopped)
+    }
+
+    /// A free TCP port on the loopback interface.
+    private static func freePort() throws -> Int {
+        let socket = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        defer { close(socket) }
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let bound = withUnsafeMutablePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(socket, $0, length) == 0 && getsockname(socket, $0, &length) == 0 }
+        }
+        guard bound else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        return Int(in_port_t(bigEndian: address.sin_port))
+    }
+
+    /// A connection to the serial port QEMU serves on the loopback interface.
+    private final class SerialConsole {
+        private let socket: Int32
+        private(set) var text = ""
+
+        /// Connects, retrying until QEMU listens or the timeout passes.
+        init(port: Int, timeout: TimeInterval) async throws {
+            let deadline = Date().addingTimeInterval(timeout)
+            var address = sockaddr_in()
+            address.sin_family = sa_family_t(AF_INET)
+            address.sin_port = in_port_t(port).bigEndian
+            address.sin_addr.s_addr = inet_addr("127.0.0.1")
+            while true {
+                let socket = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+                let connected = withUnsafePointer(to: &address) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(socket, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0 }
+                }
+                if connected {
+                    _ = fcntl(socket, F_SETFL, fcntl(socket, F_GETFL) | O_NONBLOCK)
+                    self.socket = socket
+                    return
+                }
+                let error = errno
+                close(socket)
+                guard Date() < deadline else {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(error), userInfo: [NSLocalizedDescriptionKey: "no connection to the serial port \(port) within \(Int(timeout)) s: \(String(cString: strerror(error)))"])
+                }
+                try await Task.sleep(nanoseconds: 500_000_000)
+            }
+        }
+
+        deinit {
+            close(socket)
+        }
+
+        func send(_ string: String) {
+            _ = string.withCString { write(socket, $0, strlen($0)) }
+        }
+
+        /// Reads until the text read so far contains `marker` or the timeout passes; a closed
+        /// console throws.
+        @discardableResult
+        func read(until marker: String, timeout: TimeInterval) async throws -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while Date() < deadline {
+                let count = Darwin.read(socket, &buffer, buffer.count)
+                if count > 0 {
+                    text += String(decoding: buffer[0..<count], as: UTF8.self)
+                    if text.contains(marker) {
+                        return true
+                    }
+                } else if count == 0 || errno != EAGAIN {
+                    let error = count == 0 ? ECONNRESET : errno
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(error), userInfo: [NSLocalizedDescriptionKey: "the serial console closed: \(String(cString: strerror(error)))"])
+                } else {
+                    try await Task.sleep(nanoseconds: 200_000_000)
+                }
+            }
+            return false
+        }
+    }
+
+    private static let shellPrompt = "Shell>"
+    private static let firmwareBanner = "UEFI Interactive Shell"
+
+    /// Adds a small disk image, which a saved state needs to be kept in, to the configuration.
+    private static func addDisk(to config: UTMQemuConfiguration) {
+        var drive = UTMQemuConfigurationDrive(forArchitecture: .aarch64, target: QEMUTarget_aarch64.virt)
+        drive.sizeMib = 32
+        config.drives = [drive]
+    }
+
+    /// Adds a serial port served over TCP on a free port to the configuration.
+    private static func addSerialPort(to config: UTMQemuConfiguration) throws -> Int {
+        let port = try freePort()
+        var serial = UTMQemuConfigurationSerial()
+        serial.mode = .tcpServer
+        serial.tcpPort = port
+        config.serials = [serial]
+        return port
+    }
+
+    /// The firmware console reaches a serial port served over TCP.
+    func testSerialPortCarriesTheFirmwareConsole() async throws {
+        var port = 0
+        let vm = try await makeShellVM { config in
+            port = (try? Self.addSerialPort(to: config)) ?? 0
+        }
+        XCTAssertNotEqual(port, 0, "no free port")
+        try await vm.start()
+        let console = try await SerialConsole(port: port, timeout: Self.drawTimeout)
+        let prompt = try await console.read(until: Self.shellPrompt, timeout: Self.drawTimeout)
+        add(XCTAttachment(string: console.text))
+        XCTAssertTrue(prompt, "no shell prompt on the serial port within \(Int(Self.drawTimeout)) s")
+        try await vm.stop(usingMethod: .force)
+        let stopped = await waitForState(vm, .stopped, timeout: Self.stopTimeout)
+        XCTAssertTrue(stopped, "the VM is \(vm.state) after a forced stop")
+    }
+
+    /// A saved state marks the VM suspended and the next start resumes it: the shell answers
+    /// on the serial port without the firmware booting again.
+    func testSuspendedStateIsRestoredOnTheNextStart() async throws {
+        var port = 0
+        let vm = try await makeShellVM { config in
+            port = (try? Self.addSerialPort(to: config)) ?? 0
+            Self.addDisk(to: config)
+        }
+        XCTAssertNotEqual(port, 0, "no free port")
+        try await vm.start()
+        let booted = try await SerialConsole(port: port, timeout: Self.drawTimeout)
+        let prompt = try await booted.read(until: Self.shellPrompt, timeout: Self.drawTimeout)
+        XCTAssertTrue(prompt, "no shell prompt before the save")
+        try await vm.saveSnapshot()
+        XCTAssertTrue(vm.registryEntry.isSuspended, "the VM is not marked suspended after a save")
+        // iOS can suspend the app as soon as the save returns, so the mark must be stored by then
+        let stored = UserDefaults.standard.dictionary(forKey: "Registry")?[vm.id.uuidString] as? [String: Any]
+        XCTAssertEqual(stored?["Suspended"] as? Bool, true, "the suspended mark is not in the stored registry when the save returns")
+        try await vm.stop(usingMethod: .force)
+        var stopped = await waitForState(vm, .stopped, timeout: Self.stopTimeout)
+        XCTAssertTrue(stopped, "the VM is \(vm.state) after a forced stop")
+        try await vm.start()
+        XCTAssertEqual(vm.state, .started)
+        XCTAssertFalse(vm.registryEntry.isSuspended, "the saved state was not consumed by the start")
+        // a resumed shell answers a newline with a new prompt; a fresh boot prints its banner first
+        let resumed = try await SerialConsole(port: port, timeout: Self.drawTimeout)
+        resumed.send("\r")
+        let answered = try await resumed.read(until: Self.shellPrompt, timeout: Self.drawTimeout)
+        add(XCTAttachment(string: resumed.text))
+        XCTAssertTrue(answered, "the shell did not answer on the serial port after the resume")
+        XCTAssertFalse(resumed.text.contains(Self.firmwareBanner), "the firmware booted again instead of resuming the saved state")
+        try await vm.stop(usingMethod: .force)
+        stopped = await waitForState(vm, .stopped, timeout: Self.stopTimeout)
+        XCTAssertTrue(stopped, "the VM is \(vm.state) after a forced stop")
+    }
+
+    /// Runs the Shortcuts "Pause Virtual Machine" action on the VM.
+    @available(macOS 13, *)
+    private func runPauseAction(on vm: UTMQemuVirtualMachine, saveState: Bool) async throws {
+        let intent = UTMPauseActionIntent()
+        intent.isSaveState = saveState
+        _ = try await intent.perform(with: vm, boxed: VMData(wrapping: vm))
+    }
+
+    /// The Shortcuts "Pause Virtual Machine" action with Save State pauses the VM and saves its state.
+    func testPauseShortcutSavesTheState() async throws {
+        guard #available(macOS 13, *) else {
+            throw XCTSkip("Shortcuts actions need macOS 13")
+        }
+        let vm = try await makeShellVM { config in
+            Self.addDisk(to: config)
+        }
+        try await vm.start()
+        XCTAssertEqual(vm.state, .started)
+        try await runPauseAction(on: vm, saveState: true)
+        XCTAssertEqual(vm.state, .paused, "the VM is not paused after the action")
+        XCTAssertTrue(vm.registryEntry.isSuspended, "the action did not save the VM's state")
+    }
+
+    /// The action with Save State also saves a VM that is already paused.
+    func testPauseShortcutSavesAPausedVM() async throws {
+        guard #available(macOS 13, *) else {
+            throw XCTSkip("Shortcuts actions need macOS 13")
+        }
+        let vm = try await makeShellVM { config in
+            Self.addDisk(to: config)
+        }
+        try await vm.start()
+        try await vm.pause()
+        XCTAssertEqual(vm.state, .paused)
+        try await runPauseAction(on: vm, saveState: true)
+        XCTAssertEqual(vm.state, .paused, "the VM is not paused after the action")
+        XCTAssertTrue(vm.registryEntry.isSuspended, "the action did not save the paused VM's state")
+    }
+
+    /// The action without Save State only pauses the VM.
+    func testPauseShortcutWithoutSaveStateOnlyPauses() async throws {
+        guard #available(macOS 13, *) else {
+            throw XCTSkip("Shortcuts actions need macOS 13")
+        }
+        let vm = try await makeShellVM { config in
+            Self.addDisk(to: config)
+        }
+        try await vm.start()
+        try await runPauseAction(on: vm, saveState: false)
+        XCTAssertEqual(vm.state, .paused, "the VM is not paused after the action")
+        XCTAssertFalse(vm.registryEntry.isSuspended, "the action saved the state without Save State")
+    }
+
+    /// The action with Save State fails on a VM whose state cannot be saved (here an NVMe
+    /// drive) and leaves it running.
+    func testPauseShortcutRefusedKeepsTheVMRunning() async throws {
+        guard #available(macOS 13, *) else {
+            throw XCTSkip("Shortcuts actions need macOS 13")
+        }
+        let vm = try await makeShellVM { config in
+            Self.addDisk(to: config)
+            config.drives[0].interface = .nvme
+        }
+        try await vm.start()
+        XCTAssertNotNil(vm.snapshotUnsupportedError, "a VM with an NVMe drive should not be able to save its state")
+        var failed = false
+        do {
+            try await runPauseAction(on: vm, saveState: true)
+        } catch {
+            failed = true
+        }
+        XCTAssertTrue(failed, "the action succeeded on a VM whose state cannot be saved")
+        XCTAssertEqual(vm.state, .started, "the VM is not running after the refused action")
+        XCTAssertFalse(vm.registryEntry.isSuspended)
+    }
+
+    /// A restart resets the guest, which boots the firmware again, and leaves the VM started.
+    func testRestartBootsTheFirmwareAgain() async throws {
+        var port = 0
+        let vm = try await makeShellVM { config in
+            port = (try? Self.addSerialPort(to: config)) ?? 0
+        }
+        XCTAssertNotEqual(port, 0, "no free port")
+        try await vm.start()
+        let console = try await SerialConsole(port: port, timeout: Self.drawTimeout)
+        let prompt = try await console.read(until: Self.shellPrompt, timeout: Self.drawTimeout)
+        XCTAssertTrue(prompt, "no shell prompt before the restart")
+        let before = console.text.components(separatedBy: Self.firmwareBanner).count - 1
+        try await vm.restart()
+        XCTAssertEqual(vm.state, .started)
+        let deadline = Date().addingTimeInterval(Self.drawTimeout)
+        var banners = before
+        while banners <= before && Date() < deadline {
+            try await console.read(until: Self.shellPrompt, timeout: 1)
+            banners = console.text.components(separatedBy: Self.firmwareBanner).count - 1
+        }
+        add(XCTAttachment(string: console.text))
+        XCTAssertGreaterThan(banners, before, "the firmware did not boot again after the restart")
+        try await vm.stop(usingMethod: .force)
+        let stopped = await waitForState(vm, .stopped, timeout: Self.stopTimeout)
+        XCTAssertTrue(stopped, "the VM is \(vm.state) after a forced stop")
+    }
+
+    /// A VM whose display was removed after a run starts again without one.
+    func testStartsHeadlessAfterItsDisplayIsRemoved() async throws {
+        let vm = try await makeShellVM()
+        try await vm.start()
+        try await vm.stop(usingMethod: .force)
+        var stopped = await waitForState(vm, .stopped, timeout: Self.stopTimeout)
+        XCTAssertTrue(stopped, "the VM is \(vm.state) after a forced stop")
+        vm.config.displays = []
+        try await vm.save()
+        try await vm.start()
+        XCTAssertEqual(vm.state, .started)
+        try await vm.stop(usingMethod: .force)
+        stopped = await waitForState(vm, .stopped, timeout: Self.stopTimeout)
+        XCTAssertTrue(stopped, "the VM is \(vm.state) after a forced stop")
+    }
+
+    /// A remote session, the way UTM Server starts a VM for a client: QEMU's monitor goes
+    /// through pipes instead of SPICE, and its SPICE server takes a TLS client that is shown
+    /// the display. The session's files, which include the server's private key, are gone
+    /// once the VM has stopped.
+    func testRemoteSessionServesASpiceClient() async throws {
+        let vm = try await makeShellVM()
+        try await vm.start(options: .remoteSession)
+        XCTAssertEqual(vm.state, .started)
+        let server = try XCTUnwrap(vm.spiceServerInfo, "a remote session has no SPICE server details")
+        // the client side of UTMRemoteSpiceVirtualMachine, on the loopback interface
+        let client = UTMSpiceIO(host: "127.0.0.1", tlsPort: Int(server.spicePortInternal), serverPublicKey: server.spicePublicKey, password: server.spicePassword, options: [])
+        try client.start()
+        defer {
+            client.disconnect()
+        }
+        try client.connect()
+        let screenshot = try await waitForDrawnScreenshot(timeout: Self.drawTimeout) {
+            guard client.isConnected, client.primaryDisplay != nil else {
+                return nil
+            }
+            let image = await withCheckedContinuation { continuation in
+                client.screenshot { continuation.resume(returning: $0?.image) }
+            }
+            return image.map { UTMVirtualMachineScreenshot(wrapping: $0) }
+        }
+        if let data = screenshot?.pngData {
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.png")
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        XCTAssertTrue(client.isConnected, "the client did not connect to the SPICE server")
+        XCTAssertNotNil(screenshot, "the client was not shown the firmware within \(Int(Self.drawTimeout)) s")
+        XCTAssertEqual(vm.state, .started, "the VM stopped on its own")
+        try await vm.stop(usingMethod: .force)
+        let stopped = await waitForState(vm, .stopped, timeout: Self.stopTimeout)
+        XCTAssertTrue(stopped, "the VM is \(vm.state) after a forced stop")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: vm.config.spiceTlsKeyUrl.path), "the session's private key was left behind")
+    }
+
+    /// A remote session that fails to start leaves none of its files behind either. The start
+    /// fails after they are created: the UEFI variables are gone and the bundle is read-only,
+    /// so they cannot be created again.
+    func testFailedRemoteSessionLeavesNoPrivateKey() async throws {
+        let vm = try await makeShellVM()
+        let variables = try XCTUnwrap(vm.config.qemu.efiVarsURL)
+        let data = variables.deletingLastPathComponent()
+        try FileManager.default.removeItem(at: variables)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: data.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: data.path)
+        }
+        do {
+            try await vm.start(options: .remoteSession)
+            XCTFail("starting without UEFI variables in a read-only bundle did not fail")
+        } catch {
+            // the error is the failed write; a session file left behind is the regression
+        }
+        XCTAssertEqual(vm.state, .stopped)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: vm.config.spiceTlsKeyUrl.path), "the session's private key was left behind")
+    }
+
+    /// A paused VM can be killed.
+    func testStopByKillWhilePaused() async throws {
+        let vm = try await makeShellVM()
+        try await vm.start()
+        try await vm.pause()
+        let paused = await waitForState(vm, .paused, timeout: Self.stopTimeout)
+        XCTAssertTrue(paused, "the VM is \(vm.state) after pause")
+        try await vm.stop(usingMethod: .kill)
+        let stopped = await waitForState(vm, .stopped, timeout: Self.stopTimeout)
+        XCTAssertTrue(stopped, "the VM is \(vm.state) after kill")
+    }
+
+    /// A VM whose state cannot be saved refuses to suspend to disk and keeps running.
+    func testSaveStateRefusedKeepsTheVMRunning() async throws {
+        let vm = try await makeShellVM { config in
+            var drive = UTMQemuConfigurationDrive(forArchitecture: .aarch64, target: QEMUTarget_aarch64.virt)
+            drive.interface = .nvme
+            drive.sizeMib = 32
+            config.drives = [drive]
+        }
+        try await vm.start()
+        XCTAssertNotNil(vm.snapshotUnsupportedError, "an NVMe drive should rule out saving the state")
+        do {
+            try await vm.pauseAndSaveState()
+            XCTFail("the state was saved")
+        } catch {
+            add(XCTAttachment(string: error.localizedDescription))
+            // a save that was attempted fails this way, after the VM has been paused
+            if case UTMQemuVirtualMachineError.saveSnapshotFailed(_) = error {
+                XCTFail("the VM was paused for a save that cannot succeed")
+            }
+        }
+        XCTAssertEqual(vm.state, .started, "the VM is not running after the refused save")
+        XCTAssertFalse(vm.registryEntry.isSuspended, "the VM is marked suspended after the refused save")
+    }
+
+    /// A save that fails in QEMU resumes the VM instead of leaving it paused.
+    func testSaveStateFailureResumesTheVM() async throws {
+        // QEMU cannot keep a state in a writable raw image
+        let vm = try await makeShellVM { config in
+            var drive = UTMQemuConfigurationDrive(forArchitecture: .aarch64, target: QEMUTarget_aarch64.virt)
+            drive.isRawImage = true
+            drive.sizeMib = 32
+            config.drives = [drive]
+        }
+        try await vm.start()
+        XCTAssertNil(vm.snapshotUnsupportedError)
+        do {
+            try await vm.pauseAndSaveState()
+            XCTFail("the state was saved in a raw image")
+        } catch {
+            add(XCTAttachment(string: error.localizedDescription))
+        }
+        XCTAssertEqual(vm.state, .started, "the VM is not running after the failed save")
+        XCTAssertFalse(vm.registryEntry.isSuspended, "the VM is marked suspended after the failed save")
+    }
+}
+#endif

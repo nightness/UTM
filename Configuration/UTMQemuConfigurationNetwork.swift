@@ -161,6 +161,19 @@ struct UTMQemuConfigurationNetwork: Codable, Identifiable {
     }
 }
 
+// MARK: - Backend
+
+extension UTMQemuConfigurationNetwork {
+    /// Shared, host-only and bridged networks use vmnet, which needs an entitlement
+    var isVmnet: Bool {
+        #if os(macOS)
+        return mode != .emulated
+        #else
+        return false
+        #endif
+    }
+}
+
 // MARK: - Default construction
 
 extension UTMQemuConfigurationNetwork {
@@ -177,14 +190,19 @@ extension UTMQemuConfigurationNetwork {
             hardware = QEMUNetworkDevice_x86_64.e1000
         } else if rawTarget == "isapc" {
             hardware = QEMUNetworkDevice_x86_64.ne2k_isa
-        } else if rawTarget.hasPrefix("virt-") || rawTarget == "virt" {
+        } else if rawTarget.hasPrefix("virt-") || rawTarget == "virt" || rawTarget.hasPrefix("pseries") {
             hardware = QEMUNetworkDevice_aarch64.virtio_net_pci
-        } else if [.ppc, .ppc64].contains(architecture) && rawTarget == QEMUTarget_ppc.mac99.rawValue {
+        } else if target.isPowerMacMachine {
             hardware = QEMUNetworkDevice_ppc.sungem
+        } else if [.ppc, .ppc64].contains(architecture) && rawTarget == QEMUTarget_ppc.sam460ex.rawValue {
+            hardware = QEMUNetworkDevice_ppc.rtl8139
         } else if architecture == .m68k && rawTarget == QEMUTarget_m68k.q800.rawValue {
             hardware = QEMUNetworkDevice_m68k.dp8393x
         } else {
-            let cards = architecture.networkDeviceType.allRawValues
+            // eTSEC is a sysbus card that only the ppce500 machine can take
+            let cards = architecture.networkDeviceType.allRawValues.filter {
+                $0 != QEMUNetworkDevice_ppc.eTSEC.rawValue || rawTarget == QEMUTarget_ppc.ppce500.rawValue
+            }
             if let first = cards.first {
                 hardware = AnyQEMUConstant(rawValue: first)!
             } else {

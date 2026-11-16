@@ -57,8 +57,18 @@ enum AlertItem: Identifiable {
     
     /// Sandbox location for storing .utm bundles
     nonisolated static var defaultStorageUrl: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        #if DEBUG
+        if let override = storageUrlOverride {
+            return override
+        }
+        #endif
+        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
+
+    #if DEBUG
+    /// Replaces the storage location so tests keep their bundles in a directory they own.
+    nonisolated(unsafe) static var storageUrlOverride: URL?
+    #endif
     
     /// View: show VM settings
     @Published var showSettingsModal: Bool
@@ -529,6 +539,15 @@ enum AlertItem: Identifiable {
                     config.networks[i].macAddress = UTMQemuConfigurationNetwork.randomMacAddress()
                 }
             }
+            #if os(macOS)
+            if let config = newVM.wrapped!.config as? UTMAppleConfiguration {
+                config.networks = config.networks.map { network in
+                    var network = network
+                    network.macAddress = UTMAppleConfigurationNetwork.randomMacAddress()
+                    return network
+                }
+            }
+            #endif
         }
         try await newVM.save()
         var index = virtualMachines.firstIndex(of: vm)
@@ -673,24 +692,33 @@ enum AlertItem: Identifiable {
         let fileName = url.lastPathComponent
         let dest = documentsURL.appendingPathComponent(fileName, isDirectory: true)
         if let vm = virtualMachines.first(where: { vm -> Bool in
-            return isSameFile(vm.pathUrl, as: url)
+            return vm.isLoaded && isSameFile(vm.pathUrl, as: url)
         }) {
             logger.info("found existing vm!")
-            if !vm.isLoaded {
-                logger.info("existing vm is wrapped")
-                try vm.load()
-            } else {
-                logger.info("existing vm is not wrapped")
-                listSelect(vm: vm)
-            }
+            listSelect(vm: vm)
             return
         }
         // check if VM is valid
-        guard let _ = try? VMData(url: url) else {
+        guard let opened = try? VMData(url: url) else {
             throw UTMDataError.importFailed
         }
+        let isInbox = fileBasePath.resolvingSymlinksInPath().path == documentsURL.appendingPathComponent("Inbox", isDirectory: true).path
+        // an unavailable VM (its saved bookmark did not resolve at launch) is replaced by the one
+        // just opened, with a new bookmark, or it would be unavailable again after the next launch
+        if asShortcut && !isInbox, let index = virtualMachines.firstIndex(where: { !$0.isLoaded && $0.id == opened.id }) {
+            logger.info("replacing unavailable vm")
+            endObservingChanges(for: virtualMachines[index])
+            virtualMachines[index] = opened
+            beginObservingChanges(for: opened)
+            try? await opened.wrapped?.updateRegistryFromConfig()
+            // the launcher's bookmark was made from the one that failed
+            opened.registryEntry?.package.remoteBookmark = nil
+            listSelect(vm: opened)
+            warnIfCustomArguments(in: opened)
+            return
+        }
         let vm: VMData?
-        if (fileBasePath.resolvingSymlinksInPath().path == documentsURL.appendingPathComponent("Inbox", isDirectory: true).path) {
+        if isInbox {
             logger.info("moving from Inbox")
             try fileManager.moveItem(at: url, to: dest)
             vm = try VMData(url: dest)
@@ -707,7 +735,12 @@ enum AlertItem: Identifiable {
         }
         listAdd(vm: vm)
         listSelect(vm: vm)
-        // warn user if imported .utm has custom arguments
+        warnIfCustomArguments(in: vm)
+    }
+
+    /// Warn the user if a VM from an untrusted source has custom QEMU arguments
+    /// - Parameter vm: Imported or downloaded VM
+    private func warnIfCustomArguments(in vm: VMData) {
         if let qemuConfig = vm.wrapped?.config as? UTMQemuConfiguration, !qemuConfig.qemu.additionalArguments.isEmpty {
             showLocalizedErrorAlert("This virtual machine uses custom QEMU arguments which is potentially dangerous and can cause damage to your machine. You should only run this virtual machine if you trust it.")
         }
@@ -830,15 +863,19 @@ enum AlertItem: Identifiable {
 
     /// Create a new VM by downloading a .zip and extracting it
     /// - Parameter components: Download URL components
-    func downloadUTMZip(from url: URL) {
+    /// - Returns: Task that finishes once the VM is added or the download failed
+    @discardableResult
+    func downloadUTMZip(from url: URL) -> Task<Void, Never> {
         let task = UTMDownloadVMTask(for: url)
         listAdd(pendingVM: task.pendingVM)
-        Task {
+        return Task {
             do {
                 if let wrapped = try await task.download() {
                     let vm = VMData(wrapping: wrapped)
                     try await self.save(vm: vm)
                     listAdd(vm: vm)
+                    listSelect(vm: vm)
+                    warnIfCustomArguments(in: vm)
                 }
             } catch {
                 showErrorAlert(message: error.localizedDescription)
@@ -1272,7 +1309,10 @@ struct UTMCapabilities: OptionSet, Codable {
     /// If set, host is x86_64
     static let isX86_64 = Self(rawValue: 1 << 3)
 
-    static fileprivate(set) var current: Self = {
+    /// If set, QEMU can create vmnet (shared, host-only and bridged) networks.
+    static let hasVmnetEntitlement = Self(rawValue: 1 << 4)
+
+    static internal(set) var current: Self = {
         var current = Self()
         #if WITH_JIT
         if jb_has_jit_entitlement() {
@@ -1280,6 +1320,11 @@ struct UTMCapabilities: OptionSet, Codable {
         }
         if jb_has_hypervisor() {
             current.insert(.hasHypervisorSupport)
+        }
+        #endif
+        #if os(macOS)
+        if jb_has_vmnet_entitlement() {
+            current.insert(.hasVmnetEntitlement)
         }
         #endif
         #if arch(arm64)

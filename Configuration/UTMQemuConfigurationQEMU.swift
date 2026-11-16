@@ -55,10 +55,9 @@ struct UTMQemuConfigurationQEMU: Codable {
     /// If true, emulate a PS/2 controller instead of relying on USB emulation.
     var hasPS2Controller: Bool = false
 
-    /// Add an interrupt remapping IOMMU (x2APIC) for x86_64 q35 guests on Intel HVF.
+    /// Add an interrupt remapping IOMMU for x86_64 q35 guests using the hypervisor on Intel.
     var hasInterruptRemapping: Bool = true
-
-    /// Lock guest RAM in host memory (`-overcommit mem-lock=on`) for x86_64 guests on Intel HVF.
+    /// Lock guest RAM in host memory for x86_64 guests using the hypervisor on Intel.
     var hasMemoryLock: Bool = true
 
     /// Let the guest's power state drive the Mac: guest sleep (ACPI S3) is allowed, and the Mac's
@@ -166,16 +165,47 @@ struct UTMQemuConfigurationQEMU: Codable {
     }
 }
 
+// MARK: - Editing rules
+
+extension UTMQemuConfigurationQEMU {
+    /// Adds or removes the TPM. A new TPM resets the UEFI variables so the Secure Boot
+    /// keys can be preloaded where the machine supports Secure Boot; removing it drops
+    /// the key preload.
+    mutating func setTPMDevice(_ hasTPMDevice: Bool, for system: UTMQemuConfigurationSystem) {
+        self.hasTPMDevice = hasTPMDevice
+        if hasTPMDevice {
+            isUefiVariableResetRequested = true
+            hasPreloadedSecureBootKeys = system.hasSecureBootSupport
+        } else {
+            hasPreloadedSecureBootKeys = false
+        }
+    }
+    
+    /// Requests or cancels a reset of the UEFI variables; keys are only preloaded into reset variables.
+    mutating func setUefiVariableResetRequested(_ isRequested: Bool) {
+        isUefiVariableResetRequested = isRequested
+        if !isRequested {
+            hasPreloadedSecureBootKeys = false
+        }
+    }
+    
+    /// Secure Boot keys can be preloaded into reset UEFI variables when a TPM is present
+    /// and the machine supports Secure Boot.
+    func canPreloadSecureBootKeys(for system: UTMQemuConfigurationSystem) -> Bool {
+        isUefiVariableResetRequested && hasTPMDevice && system.hasSecureBootSupport
+    }
+}
+
 // MARK: - Default construction
 
 extension UTMQemuConfigurationQEMU {
     init(forArchitecture architecture: QEMUArchitecture, target: any QEMUTarget) {
         self.init()
         let rawTarget = target.rawValue
-        if rawTarget.hasPrefix("pc") || rawTarget.hasPrefix("q35") {
+        if target.isPcOrQ35Machine {
             hasUefiBoot = true
             hasRNGDevice = true
-        } else if Self.uefiImagePrefix(forArchitecture: architecture) != nil && (rawTarget.hasPrefix("virt-") || rawTarget == "virt") {
+        } else if architecture.hasUefiSupport && (rawTarget.hasPrefix("virt-") || rawTarget == "virt") {
             hasUefiBoot = true
             hasRNGDevice = true
         }
@@ -213,7 +243,8 @@ extension UTMQemuConfigurationQEMU {
             // save EFI variables
             let resourceURL = Bundle.main.url(forResource: "qemu", withExtension: nil)!
             let templateVarsURL: URL
-            let secure = hasPreloadedSecureBootKeys ? "-secure" : ""
+            // only machines with Secure Boot support ship variables with the keys preloaded
+            let secure = hasPreloadedSecureBootKeys && system.hasSecureBootSupport ? "-secure" : ""
             if let prefix = Self.uefiImagePrefix(forArchitecture: system.architecture, isVars: true) {
                 templateVarsURL = resourceURL.appendingPathComponent("\(prefix)\(secure)-vars.fd")
             } else {

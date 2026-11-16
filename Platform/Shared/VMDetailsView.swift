@@ -44,6 +44,7 @@ struct VMDetailsView: View {
     @State private var selectedTab: Tab = .details
     @State private var size: Int64 = 0
     @State private var updateTask: Task<Void, Never>?
+    @State private var refreshSizeTask: Task<Void, Never>?
     private let updateIpIntervalNs = UInt64(10 * 1_000_000_000)
 
     private var sizeLabel: String {
@@ -87,7 +88,7 @@ struct VMDetailsView: View {
             }
             .modifier(VMOptionalNavigationTitleModifier(vm: vm))
             .modifier(VMToolbarModifier(vm: vm, bottom: !regularScreenSizeClass))
-            .sheet(isPresented: $data.showSettingsModal) {
+            .sheet(isPresented: $data.showSettingsModal, onDismiss: refreshSize) {
                 if let qemuConfig = vm.config as? UTMQemuConfiguration {
                     VMSettingsView(vm: vm, config: qemuConfig)
                         .environmentObject(data)
@@ -100,6 +101,7 @@ struct VMDetailsView: View {
                 #endif
             }
             .taskOnAppear(id: vm.id) {
+                refreshSizeTask?.cancel()
                 size = await data.computeSize(for: vm)
                 #if WITH_REMOTE
                 if let vm = vm.wrapped as? UTMRemoteSpiceVirtualMachine {
@@ -111,6 +113,18 @@ struct VMDetailsView: View {
                     try? await Task.sleep(nanoseconds: updateIpIntervalNs)
                 }
                 #endif
+            }
+        }
+    }
+
+    /// Compute the size again after the settings changed the VM's files (a new or compressed drive).
+    private func refreshSize() {
+        refreshSizeTask?.cancel()
+        refreshSizeTask = Task { @MainActor in
+            let newSize = await data.computeSize(for: vm)
+            // another VM was selected in the meantime
+            if !Task.isCancelled {
+                size = newSize
             }
         }
     }
@@ -161,11 +175,15 @@ struct VMDetailsView: View {
     @ViewBuilder private var detailsPane: some View {
         VStack {
             let notes = vm.detailsNotes ?? ""
+            let formattedNotes = (try? AttributedString(
+                markdown: notes,
+                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+            )) ?? AttributedString(notes)
             if regularScreenSizeClass && !notes.isEmpty {
                 HStack(alignment: .top) {
                     Details(vm: vm, sizeLabel: sizeLabel)
                         .frame(maxWidth: .infinity)
-                    Text(notes)
+                    Text(formattedNotes)
                         .font(.body)
                         .frame(maxWidth: .infinity, alignment: .topLeading)
                         .fixedSize(horizontal: false, vertical: true)
@@ -180,15 +198,16 @@ struct VMDetailsView: View {
                         .padding([.leading, .trailing, .bottom])
                 }
                 #else
-                let qemuConfig = vm.config as! UTMQemuConfiguration
-                VMRemovableDrivesView(vm: vm, config: qemuConfig)
-                    .padding([.leading, .trailing, .bottom])
+                if let qemuConfig = vm.config as? UTMQemuConfiguration {
+                    VMRemovableDrivesView(vm: vm, config: qemuConfig)
+                        .padding([.leading, .trailing, .bottom])
+                }
                 #endif
             } else {
                 VStack {
                     Details(vm: vm, sizeLabel: sizeLabel)
                     if !notes.isEmpty {
-                        Text(notes)
+                        Text(formattedNotes)
                             .font(.body)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -199,8 +218,9 @@ struct VMDetailsView: View {
                         VMRemovableDrivesView(vm: vm, config: qemuVM.config)
                     }
                     #else
-                    let qemuConfig = vm.config as! UTMQemuConfiguration
-                    VMRemovableDrivesView(vm: vm, config: qemuConfig)
+                    if let qemuConfig = vm.config as? UTMQemuConfiguration {
+                        VMRemovableDrivesView(vm: vm, config: qemuConfig)
+                    }
                     #endif
                 }.padding([.leading, .trailing, .bottom])
             }
@@ -304,23 +324,25 @@ struct Screenshot: View {
     
     var body: some View {
         ZStack {
-            Rectangle()
-                .fill(Color.black)
-            if let screenshotImage = vm.screenshotImage {
-                #if os(macOS)
-                Image(nsImage: screenshotImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                #else
-                Image(uiImage: screenshotImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                #endif
+            ZStack {
+                Rectangle()
+                    .fill(Color.black)
+                if let screenshotImage = vm.screenshotImage {
+                    #if os(macOS)
+                    Image(nsImage: screenshotImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                    #else
+                    Image(uiImage: screenshotImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                    #endif
+                }
+                Rectangle()
+                    .fill(colorScheme == .dark ? darkOverlay : lightOverlay)
+                    .blendMode(colorScheme == .dark ? .multiply : .hardLight)
             }
-            Rectangle()
-                .fill(colorScheme == .dark ? darkOverlay : lightOverlay)
-                .blendMode(colorScheme == .dark ? .multiply : .hardLight)
-                .optionalBackgroundExtensionEffect()
+            .optionalBackgroundExtensionEffect()
             #if os(visionOS)
                 .overlay {
                     if vm.isStopped || vm.isTakeoverAllowed {
@@ -357,7 +379,9 @@ private extension View {
     @ViewBuilder
     func optionalBackgroundExtensionEffect() -> some View {
         if #available(iOS 26, macOS 26, visionOS 26, *) {
-            self.backgroundExtensionEffect()
+            // flatten first, or the effect snapshots only the topmost layer and any blend
+            // with the content behind it is lost
+            self.compositingGroup().backgroundExtensionEffect()
         } else {
             self
         }
@@ -414,6 +438,7 @@ struct Details: View {
                 Spacer()
                 Text(sizeLabel)
                     .foregroundColor(.secondary)
+                    .accessibilityIdentifier(UTMAccessibilityID.Details.size)
             }
             #if os(macOS)
             if let appleConfig = vm.config as? UTMAppleConfiguration {

@@ -16,10 +16,11 @@
 
 import Foundation
 import Virtualization
+import Carbon.HIToolbox
 
 class VMDisplayAppleDisplayWindowController: VMDisplayAppleWindowController {
-    var appleView: VZVirtualMachineView! {
-        mainView as? VZVirtualMachineView
+    var appleView: VMAppleVirtualMachineView! {
+        mainView as? VMAppleVirtualMachineView
     }
 
     override var contentView: NSView? {
@@ -49,9 +50,11 @@ class VMDisplayAppleDisplayWindowController: VMDisplayAppleWindowController {
     private var isReadyToSaveResolution: Bool = false
 
     @Setting("FullScreenAutoCapture") private var isFullScreenAutoCapture: Bool = false
+    /// Modifier keys held down by scripted input, by key code
+    private var scriptedModifierKeys: Set<UInt16> = []
     
     override func windowDidLoad() {
-        mainView = VZVirtualMachineView()
+        mainView = VMAppleVirtualMachineView()
         captureMouseToolbarButton.image = captureMouseToolbarButton.alternateImage // show capture keyboard image
         (window as? VMDisplayWindow)?.isCameraHousingAreaAllowed = true
         screenChangedToken = NotificationCenter.default.addObserver(forName: NSWindow.didChangeScreenNotification, object: nil, queue: .main) { [weak self] _ in
@@ -78,6 +81,8 @@ class VMDisplayAppleDisplayWindowController: VMDisplayAppleWindowController {
     override func enterLive() {
         appleView.isHidden = false
         appleView.virtualMachine = appleVM.apple
+        appleView.isExtraButtonsIgnored = !(appleConfig.system.boot.operatingSystem == .macOS && appleConfig.virtualization.pointer == .trackpad)
+        appleVM.inputDelegate = self
         screenshotView.isHidden = true
         if #available(macOS 14, *) {
             appleView.automaticallyReconfiguresDisplay = isDynamicResolution
@@ -230,5 +235,149 @@ class VMDisplayAppleDisplayWindowController: VMDisplayAppleWindowController {
         cancelCheckSupportsReconfiguration?.cancel()
         cancelCheckSupportsReconfiguration = nil
         isReadyToSaveResolution = false
+    }
+}
+
+// MARK: - Scripted input
+
+extension VMDisplayAppleDisplayWindowController: UTMAppleInputProvider {
+    /// Each modifier key's flag, with the device-dependent bit (NX_DEVICE*KEYMASK) a real keyboard
+    /// sets for it: the guest keyboard tells left from right keys by those bits, and ignores a
+    /// flag without one.
+    private static let modifierFlags: [Int: NSEvent.ModifierFlags] = [
+        kVK_Control: [.control, .init(rawValue: 0x0001)],
+        kVK_Shift: [.shift, .init(rawValue: 0x0002)],
+        kVK_RightShift: [.shift, .init(rawValue: 0x0004)],
+        kVK_Command: [.command, .init(rawValue: 0x0008)],
+        kVK_RightCommand: [.command, .init(rawValue: 0x0010)],
+        kVK_Option: [.option, .init(rawValue: 0x0020)],
+        kVK_RightOption: [.option, .init(rawValue: 0x0040)],
+        kVK_RightControl: [.control, .init(rawValue: 0x2000)],
+        kVK_CapsLock: .capsLock,
+        kVK_Function: .function,
+    ]
+
+    private var scriptedModifiers: NSEvent.ModifierFlags {
+        scriptedModifierKeys.reduce(into: []) { flags, keyCode in
+            flags.formUnion(Self.modifierFlags[Int(keyCode)] ?? [])
+        }
+    }
+
+    func sendKey(_ keyCode: UInt16, isDown: Bool) -> Bool {
+        guard let view = appleView, view.virtualMachine != nil, let window = window else {
+            return false
+        }
+        let type: NSEvent.EventType
+        if Self.modifierFlags[Int(keyCode)] != nil {
+            if isDown {
+                scriptedModifierKeys.insert(keyCode)
+            } else {
+                scriptedModifierKeys.remove(keyCode)
+            }
+            type = .flagsChanged
+        } else {
+            type = isDown ? .keyDown : .keyUp
+        }
+        guard let event = NSEvent.keyEvent(with: type,
+                                           location: .zero,
+                                           modifierFlags: scriptedModifiers,
+                                           timestamp: ProcessInfo.processInfo.systemUptime,
+                                           windowNumber: window.windowNumber,
+                                           context: nil,
+                                           characters: "",
+                                           charactersIgnoringModifiers: "",
+                                           isARepeat: false,
+                                           keyCode: keyCode) else {
+            return false
+        }
+        switch type {
+        case .flagsChanged: view.flagsChanged(with: event)
+        case .keyDown: view.keyDown(with: event)
+        default: view.keyUp(with: event)
+        }
+        return true
+    }
+
+    func sendMouseClick(at point: CGPoint, button: Int) -> Bool {
+        guard let view = appleView, view.virtualMachine != nil, let window = window else {
+            return false
+        }
+        // the screenshot is in backing pixels of the view, with the origin at the top left
+        let scale = window.backingScaleFactor
+        let bounds = view.bounds
+        let local = CGPoint(x: min(max(point.x / scale, 0), bounds.width - 1),
+                            y: view.isFlipped ? min(max(point.y / scale, 0), bounds.height - 1)
+                                              : bounds.height - 1 - min(max(point.y / scale, 0), bounds.height - 1))
+        let location = view.convert(local, to: nil)
+        let (downType, upType): (NSEvent.EventType, NSEvent.EventType)
+        switch button {
+        case 1: (downType, upType) = (.rightMouseDown, .rightMouseUp)
+        case 2: (downType, upType) = (.otherMouseDown, .otherMouseUp)
+        default: (downType, upType) = (.leftMouseDown, .leftMouseUp)
+        }
+        func event(_ type: NSEvent.EventType) -> NSEvent? {
+            NSEvent.mouseEvent(with: type,
+                               location: location,
+                               modifierFlags: scriptedModifiers,
+                               timestamp: ProcessInfo.processInfo.systemUptime,
+                               windowNumber: window.windowNumber,
+                               context: nil,
+                               eventNumber: 0,
+                               clickCount: type == .mouseMoved ? 0 : 1,
+                               pressure: type == downType ? 1 : 0)
+        }
+        guard let moved = event(.mouseMoved), let down = event(downType), let up = event(upType) else {
+            return false
+        }
+        view.mouseMoved(with: moved)
+        switch button {
+        case 1:
+            view.rightMouseDown(with: down)
+            view.rightMouseUp(with: up)
+        case 2:
+            view.otherMouseDown(with: down)
+            view.otherMouseUp(with: up)
+        default:
+            view.mouseDown(with: down)
+            view.mouseUp(with: up)
+        }
+        return true
+    }
+}
+
+class VMAppleVirtualMachineView: VZVirtualMachineView {
+    /// Set when the guest has the generic USB pointing device, which only has three buttons and reports any other button as a middle click.
+    var isExtraButtonsIgnored: Bool = false
+
+    private func isIgnored(_ event: NSEvent) -> Bool {
+        isExtraButtonsIgnored && event.buttonNumber > 2
+    }
+
+    override func otherMouseDown(with event: NSEvent) {
+        guard !isIgnored(event) else {
+            return
+        }
+        super.otherMouseDown(with: event)
+    }
+
+    override func otherMouseUp(with event: NSEvent) {
+        guard !isIgnored(event) else {
+            return
+        }
+        super.otherMouseUp(with: event)
+    }
+
+    override func otherMouseDragged(with event: NSEvent) {
+        guard !isIgnored(event) else {
+            if let moved = event.cgEvent?.copy() {
+                moved.type = .mouseMoved
+                moved.setIntegerValueField(.mouseEventButtonNumber, value: 0)
+                if let movedEvent = NSEvent(cgEvent: moved) {
+                    super.mouseMoved(with: movedEvent)
+                }
+            }
+            return
+        }
+        super.otherMouseDragged(with: event)
     }
 }

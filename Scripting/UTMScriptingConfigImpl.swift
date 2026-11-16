@@ -86,6 +86,29 @@ class UTMScriptingConfigImpl {
         }
     }
     
+    /// The keys every existing drive record has, whatever the backend
+    private func serializeDriveExisting(_ drive: any UTMConfigurationDrive) -> [AnyHashable : Any] {
+        var record: [AnyHashable : Any] = [
+            "id": drive.id,
+            "removable": drive.isExternal,
+            "hostSize": size(of: drive),
+        ]
+        // an empty removable drive has no source
+        record["source"] = drive.imageURL
+        return record
+    }
+    
+    /// Is `source` the image `drive` already uses?
+    ///
+    /// A record from `get configuration` carries every drive's source, so applying it back
+    /// must leave those drives alone instead of copying or remounting their images.
+    private func isCurrentImage(_ source: URL, of drive: any UTMConfigurationDrive) -> Bool {
+        guard let current = drive.imageURL else {
+            return false
+        }
+        return source.standardizedFileURL.resolvingSymlinksInPath().path == current.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+    
     private func size(of drive: any UTMConfigurationDrive) -> Int {
         guard let data = data else {
             return 0
@@ -151,12 +174,9 @@ extension UTMScriptingConfigImpl {
     }
     
     private func serializeQemuDriveExisting(_ config: UTMQemuConfigurationDrive) -> [AnyHashable : Any] {
-        [
-            "id": config.id,
-            "removable": config.isExternal,
-            "interface": qemuDriveInterface(from: config.interface).rawValue,
-            "hostSize": size(of: config),
-        ]
+        var record = serializeDriveExisting(config)
+        record["interface"] = qemuDriveInterface(from: config.interface).rawValue
+        return record
     }
     
     private func qemuNetworkMode(from mode: QEMUNetworkMode) -> UTMScriptingQemuNetworkMode {
@@ -278,11 +298,7 @@ extension UTMScriptingConfigImpl {
     }
     
     private func serializeAppleDriveExisting(_ config: UTMAppleConfigurationDrive) -> [AnyHashable : Any] {
-        [
-            "id": config.id,
-            "removable": config.isExternal,
-            "hostSize": size(of: config),
-        ]
+        serializeDriveExisting(config)
     }
     
     private func appleNetworkMode(from mode: UTMAppleConfigurationNetwork.NetworkMode) -> UTMScriptingAppleNetworkMode {
@@ -421,14 +437,7 @@ extension UTMScriptingConfigImpl {
             config.qemu.hasBalloonDevice = balloonDevice
         }
         if let tpm = record["tpm"] as? Bool, tpm != config.qemu.hasTPMDevice {
-            config.qemu.hasTPMDevice = tpm
-            // like the TPM toggle in the settings: Secure Boot keys come with the TPM
-            if tpm {
-                config.qemu.isUefiVariableResetRequested = true
-                config.qemu.hasPreloadedSecureBootKeys = true
-            } else {
-                config.qemu.hasPreloadedSecureBootKeys = false
-            }
+            config.qemu.setTPMDevice(tpm, for: config.system)
         }
         if let tso = record["tso"] as? Bool {
             config.qemu.hasTSO = tso
@@ -487,10 +496,11 @@ extension UTMScriptingConfigImpl {
     }
     
     private func updateQemuExistingDrive(_ drive: inout UTMQemuConfigurationDrive, from record: [AnyHashable : Any]) throws {
-        if let interface = parseQemuDriveInterface(record["interface"] as? AEKeyword) {
-            drive.interface = interface
+        if let interface = parseQemuDriveInterface(record["interface"] as? AEKeyword), interface != drive.interface {
+            // like the interface picker in the settings
+            drive.setInterface(interface)
         }
-        if let source = record["source"] as? URL {
+        if let source = record["source"] as? URL, !isCurrentImage(source, of: drive) {
             drive.imageURL = source
         }
         if let size = record["guestSize"] as? Int, size > 0 {
@@ -826,7 +836,7 @@ extension UTMScriptingConfigImpl {
     }
     
     private func updateAppleExistingDrive(_ drive: inout UTMAppleConfigurationDrive, from record: [AnyHashable : Any]) throws {
-        if let source = record["source"] as? URL {
+        if let source = record["source"] as? URL, !isCurrentImage(source, of: drive) {
             drive.imageURL = source
         }
     }

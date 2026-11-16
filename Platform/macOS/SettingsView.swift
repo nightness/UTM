@@ -114,6 +114,8 @@ struct SettingsView: View {
                 }
                 Spacer()
             }
+            // wide enough for the Input pane, whose form does not shrink below its labels and controls
+            .frame(minWidth: 860)
         }
     }
 
@@ -250,6 +252,7 @@ struct DisplaySettingsView: View {
                     Text("ANGLE (Metal)").tag(UTMQEMURendererBackend.qemuRendererBackendAngleMetal)
                     Text("Apple Core OpenGL").tag(UTMQEMURendererBackend.qemuRendererBackendCGL)
                 }.help("By default, the best renderer for this device will be used. You can override this with to always use a specific renderer. This only applies to QEMU VMs with GPU accelerated graphics.")
+                .accessibilityIdentifier(UTMAccessibilityID.AppSettings.rendererBackend)
                 Picker("Vulkan Driver", selection: $qemuVulkanDriver) {
                     Text("Default").tag(UTMQEMUVulkanDriver.qemuVulkanDriverDefault)
                     Text("Disabled").tag(UTMQEMUVulkanDriver.qemuVulkanDriverDisabled)
@@ -281,13 +284,8 @@ struct DisplaySettingsView: View {
                 if !isVulkanSupported {
                     Text("The selected renderer backend does not support Vulkan.")
                 }
-                HStack {
-                    Stepper("FPS Limit", value: $qemuRendererFpsLimit, in: 0...240, step: 15)
-                    NumberTextField("", number: $qemuRendererFpsLimit, prompt: "None")
-                        .frame(width: 80)
-                        .multilineTextAlignment(.trailing)
-                        .help("If set, a frame limit can improve smoothness in rendering by preventing stutters when set to the lowest value your device can handle.")
-                }
+                NumberStepper("FPS Limit", value: $qemuRendererFpsLimit, in: 0...240, step: 15, prompt: "None", fieldWidth: 80, identifier: UTMAccessibilityID.AppSettings.fpsLimit)
+                    .help("If set, a frame limit can improve smoothness in rendering by preventing stutters when set to the lowest value your device can handle.")
             }
         }
     }

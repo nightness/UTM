@@ -119,6 +119,8 @@ final class UTMAppleVirtualMachine: UTMVirtualMachine {
     private var sharedDirectoriesChanged: AnyCancellable?
     
     weak var screenshotDelegate: UTMScreenshotProvider?
+
+    weak var inputDelegate: UTMAppleInputProvider?
     
     private var activeResourceUrls: [String: URL] = [:]
 
@@ -681,7 +683,10 @@ final class UTMAppleVirtualMachine: UTMVirtualMachine {
     
     @discardableResult @MainActor
     func takeScreenshot() async -> Bool {
-        screenshot = screenshotDelegate?.screenshot
+        // the previous screenshot stays in place when the window has nothing to capture
+        if let screenshot = screenshotDelegate?.screenshot {
+            self.screenshot = screenshot
+        }
         return true
     }
 
@@ -817,6 +822,8 @@ final class UTMAppleVirtualMachine: UTMVirtualMachine {
             throw UTMAppleVirtualMachineError.operatingSystemInstallNotSupported
             #endif
         } catch {
+            // measure before access to the disk image is given up
+            let availableCapacity = Self.isInstallationFailed(error) ? Self.availableCapacity(ofVolumeAt: await installDiskUrl) : nil
             progressObserver = nil
             installProgress = nil
             await stopAccesingResources()
@@ -833,8 +840,48 @@ final class UTMAppleVirtualMachine: UTMVirtualMachine {
                 throw UTMAppleVirtualMachineError.installMacOSVersionTooNew(guestVersion: versions.guest, hostVersion: versions.host)
             }
             #endif
+            if let spaceError = Self.installNotEnoughDiskSpaceError(for: error, availableCapacity: availableCapacity) {
+                throw spaceError
+            }
             throw error
         }
+    }
+
+    /// Below this much free space, a failed install is reported as the disk being full.
+    static let installMinimumAvailableCapacity: Int64 = 1 << 30
+
+    /// The image macOS is installed to: the first writable drive, else the package holding it.
+    @MainActor private var installDiskUrl: URL {
+        config.drives.first(where: { !$0.isReadOnly })?.imageURL ?? pathUrl
+    }
+
+    /// Free space on the volume holding `url`, not counting purgeable space, or nil if it cannot be read.
+    static func availableCapacity(ofVolumeAt url: URL) -> Int64? {
+        guard let capacity = try? url.resourceValues(forKeys: [.volumeAvailableCapacityKey]).volumeAvailableCapacity else {
+            return nil
+        }
+        return Int64(capacity)
+    }
+
+    /// Whether `error` is the generic `VZErrorInstallationFailed` from `VZMacOSInstaller`.
+    static func isInstallationFailed(_ error: Error) -> Bool {
+        let error = error as NSError
+        return error.domain == "VZErrorDomain" && error.code == 10007
+    }
+
+    /// The error to show for a failed install when the disk holding the VM has run out of space.
+    ///
+    /// `VZMacOSInstaller` reports a full disk as the generic `VZErrorInstallationFailed`, without
+    /// the underlying POSIX error, so the free space left afterwards is the only sign of it.
+    /// Returns nil for any other error, or when there is enough space or it is unknown.
+    static func installNotEnoughDiskSpaceError(for error: Error, availableCapacity: Int64?) -> UTMAppleVirtualMachineError? {
+        guard isInstallationFailed(error),
+              let availableCapacity = availableCapacity,
+              availableCapacity < installMinimumAvailableCapacity else {
+            return nil
+        }
+        let available = ByteCountFormatter.string(fromByteCount: availableCapacity, countStyle: .file)
+        return .installNotEnoughDiskSpace(available: available, reason: error.localizedDescription)
     }
 
     #if os(macOS) && arch(arm64)
@@ -1458,6 +1505,15 @@ protocol UTMScreenshotProvider: AnyObject {
     var screenshot: UTMVirtualMachineScreenshot? { get }
 }
 
+/// Sends keyboard and mouse events to the guest through the VM's display, for scripting.
+protocol UTMAppleInputProvider: AnyObject {
+    /// Press or release a key by its macOS virtual key code (`kVK_*`); modifier keys change the held modifiers.
+    @MainActor func sendKey(_ keyCode: UInt16, isDown: Bool) -> Bool
+    /// Move the pointer to a point of the display, in the pixels of its screenshot (origin top left), and click
+    /// a button (0 left, 1 right, 2 middle).
+    @MainActor func sendMouseClick(at point: CGPoint, button: Int) -> Bool
+}
+
 enum UTMAppleVirtualMachineError: Error {
     case cannotAccessResource(URL)
     case operatingSystemInstallNotSupported
@@ -1465,6 +1521,7 @@ enum UTMAppleVirtualMachineError: Error {
     case ipswNotReadable
     case deviceSupportOutdated
     case installMacOSVersionTooNew(guestVersion: String, hostVersion: String)
+    case installNotEnoughDiskSpace(available: String, reason: String)
     case usbDeviceNotFound(String)
     case usbDeviceInUse(String)
     case usbDeviceNotConnected(String)
@@ -1503,6 +1560,8 @@ extension UTMAppleVirtualMachineError: LocalizedError {
             return NSLocalizedString("You need to update macOS to run this virtual machine. A separate pop-up should prompt you to install this update. If you are trying to install a new beta version of macOS, you must manually download the Device Support package from the Apple Developer website.", comment: "UTMAppleVirtualMachine")
         case .installMacOSVersionTooNew(let guestVersion, let hostVersion):
             return String.localizedStringWithFormat(NSLocalizedString("Installation failed because macOS %1$@ is newer than macOS %2$@ running on this Mac. Update this Mac to macOS %1$@ or later and try again, or install an older version of macOS.", comment: "UTMAppleVirtualMachine"), guestVersion, hostVersion)
+        case .installNotEnoughDiskSpace(let available, let reason):
+            return String.localizedStringWithFormat(NSLocalizedString("Installation failed because the disk this virtual machine is stored on is full (%1$@ available). Free up space on it, or move the virtual machine to a disk with more space, and try again.\n\n%2$@", comment: "UTMAppleVirtualMachine"), available, reason)
         case .usbDeviceNotFound(let name):
             return String.localizedStringWithFormat(NSLocalizedString("The USB device '%@' cannot be found.", comment: "UTMAppleVirtualMachine"), name)
         case .usbDeviceInUse(let name):

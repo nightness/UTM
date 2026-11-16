@@ -71,6 +71,8 @@ build*/
 sysroot*/
 .DS_Store
 CodeSigning.xcconfig
+__pycache__/
+scripts/SwiftScripting/
 
 # unofficial Intel build output (scripts/build_intel_release.sh)
 out-intel/

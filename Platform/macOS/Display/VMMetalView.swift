@@ -30,6 +30,26 @@ class VMMetalView: MTKView {
     @Setting("IsISOKeySwapped") private var isISOKeySwapped = false
     @Setting("IsCapsLockKey") private var isCapsLockKey: Bool = false
 
+    /// Drawable supplied by a display link for the frame being drawn, used instead of one
+    /// acquired from the layer.
+    var displayLinkDrawable: CAMetalDrawable?
+
+    override var currentDrawable: CAMetalDrawable? {
+        displayLinkDrawable ?? super.currentDrawable
+    }
+
+    override var currentRenderPassDescriptor: MTLRenderPassDescriptor? {
+        guard let drawable = displayLinkDrawable else {
+            return super.currentRenderPassDescriptor
+        }
+        let descriptor = MTLRenderPassDescriptor()
+        descriptor.colorAttachments[0].texture = drawable.texture
+        descriptor.colorAttachments[0].loadAction = .clear
+        descriptor.colorAttachments[0].storeAction = .store
+        descriptor.colorAttachments[0].clearColor = clearColor
+        return descriptor
+    }
+
     private enum ModifierKeySwap {
         case none
         case ctrlCmd
@@ -128,16 +148,19 @@ class VMMetalView: MTKView {
     
     override func mouseDown(with event: NSEvent) {
         logger.trace("mouse down: \(event.buttonNumber)")
+        sendAbsolutePosition(for: event)
         inputDelegate?.mouseDown(button: .left, mask: NSEvent.pressedMouseButtons.inputButtons())
     }
     
     override func rightMouseDown(with event: NSEvent) {
         logger.trace("right mouse down: \(event.buttonNumber)")
+        sendAbsolutePosition(for: event)
         inputDelegate?.mouseDown(button: .right, mask: NSEvent.pressedMouseButtons.inputButtons())
     }
     
     override func otherMouseDown(with event: NSEvent) {
         logger.trace("other mouse down: \(event.buttonNumber)")
+        sendAbsolutePosition(for: event)
         switch event.buttonNumber {
         case 2: inputDelegate?.mouseDown(button: .middle, mask: NSEvent.pressedMouseButtons.inputButtons())
         case 3: inputDelegate?.mouseDown(button: .side, mask: NSEvent.pressedMouseButtons.inputButtons())
@@ -167,9 +190,11 @@ class VMMetalView: MTKView {
     }
     
     override func keyDown(with event: NSEvent) {
-        guard !event.isARepeat else { return }
-        logger.trace("key down: \(event.keyCode)")
-        if event.modifierFlags.contains(.numericPad) {
+        // Repeats are forwarded as more key presses, the way a real keyboard's typematic
+        // repeat does: QEMU's PS/2 keyboard does not repeat by itself, and USB/virtio
+        // keyboards ignore a press of a key that is already down.
+        logger.trace("key down: \(event.keyCode) repeat: \(event.isARepeat)")
+        if !event.isARepeat && event.modifierFlags.contains(.numericPad) {
             inputDelegate?.didUseNumericPad()
         }
         lastKeyDown = getScanCodeForEvent(event)
@@ -316,12 +341,32 @@ class VMMetalView: MTKView {
         guard isHandleInitialClick && !isMouseCaptured else {
             return false
         }
-        if let location = event?.locationInWindow {
-            let converted = convert(location, from: nil)
-            inputDelegate?.mouseMove(absolutePoint: converted,
-                                     buttonMask: NSEvent.pressedMouseButtons.inputButtons())
+        if let event = event {
+            sendAbsolutePosition(for: event)
         }
         return true
+    }
+
+    /// Moves the guest cursor to where the event happened.
+    ///
+    /// A button press is not always preceded by a move to its location (a click posted by another process, a
+    /// tap on a touch display), so the guest would otherwise click wherever its cursor was left.
+    /// The button that a mouse down event is about to press is not reported as held yet. The guest would
+    /// otherwise see it pressed before the move, and released again by the next move without it.
+    /// - Parameter event: Mouse event to take the location from
+    private func sendAbsolutePosition(for event: NSEvent) {
+        guard !isMouseCaptured else {
+            return
+        }
+        var buttons = NSEvent.pressedMouseButtons.inputButtons()
+        switch event.type {
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            buttons.subtract((1 << event.buttonNumber).inputButtons())
+        default:
+            break
+        }
+        let converted = convert(event.locationInWindow, from: nil)
+        inputDelegate?.mouseMove(absolutePoint: converted, buttonMask: buttons)
     }
 }
 

@@ -31,7 +31,6 @@ struct UTMCtl: ParsableCommand {
             Start.self,
             Suspend.self,
             Stop.self,
-            Attach.self,
             File.self,
             Exec.self,
             IPAddress.self,
@@ -71,7 +70,13 @@ extension UTMAPICommand {
                 }
             }
         }
+        // hiding the window is best effort and does not decide the exit status
+        UTMCtl.EventErrorHandler.shared.hasFailed = false
         try run(with: utmApp)
+        // a failed event has been reported already
+        if UTMCtl.EventErrorHandler.shared.hasFailed {
+            throw ExitCode.failure
+        }
     }
     
     /// Get a virtual machine from an identifier
@@ -140,7 +145,7 @@ extension UTMCtl {
         static let shared = EventErrorHandler()
 
         /// An event failed, so what it returned must not be used
-        private(set) var hasFailed = false
+        var hasFailed = false
         
         /// Error handler for scripting events
         /// - Parameters:
@@ -169,6 +174,7 @@ extension UTMCtl {
         case invalidIdentifier(String)
         case deviceNotFound
         case snapshotNotFound
+        case unexpectedResult
         
         var errorDescription: String? {
             switch self {
@@ -177,6 +183,7 @@ extension UTMCtl {
             case .snapshotNotFound: return "Snapshot not found."
             case .invalidIdentifier(let identifier): return "Identifier '\(identifier)' is invalid."
             case .deviceNotFound: return "Device not found."
+            case .unexpectedResult: return "Unexpected result from the virtual machine."
             }
         }
     }
@@ -266,9 +273,6 @@ extension UTMCtl {
         @OptionGroup var environment: EnvironmentOptions
         
         @OptionGroup var identifer: VMIdentifier
-        
-        @Flag(name: .shortAndLong, help: "Attach to the first serial port after start.")
-        var attach: Bool = false
         
         @Flag(help: "Run VM as a snapshot and do not save changes to disk.")
         var disposable: Bool = false
@@ -371,9 +375,6 @@ extension UTMCtl {
                 }
             }
             vm.startSaving!(!disposable, recovery: recovery, provisioning: provisioningOptions, environment: env.isEmpty ? nil : env)
-            if attach {
-                print("WARNING: attach command is not implemented yet!")
-            }
         }
     }
 }
@@ -453,49 +454,6 @@ extension UTMCtl {
 }
 
 extension UTMCtl {
-    struct Attach: UTMAPICommand {
-        static var configuration = CommandConfiguration(
-            abstract: "Redirect the serial input/output to this terminal."
-        )
-        
-        @OptionGroup var environment: EnvironmentOptions
-        
-        @OptionGroup var identifer: VMIdentifier
-        
-        @Option(help: "Index of the serial device to attach to.")
-        var index: Int?
-        
-        func run(with application: UTMScriptingApplication) throws {
-            let vm = try virtualMachine(forIdentifier: identifer, in: application)
-            guard let serialPorts = vm.serialPorts!() as? [UTMScriptingSerialPort] else {
-                return
-            }
-            for serialPort in serialPorts {
-                if let index = index {
-                    if index != serialPort.id!() {
-                        continue
-                    }
-                }
-                print("WARNING: attach command is not implemented yet!")
-                if let interface = serialPort.interface, interface != .unavailable {
-                    printResponse(serialPort)
-                    return
-                }
-            }
-        }
-        
-        func printResponse(_ serialPort: UTMScriptingSerialPort) {
-            // TODO: spawn a terminal emulator
-            if serialPort.interface == .ptty {
-                print("PTTY: \(serialPort.address!)")
-            } else if serialPort.interface == .tcp {
-                print("TCP: \(serialPort.address!):\(serialPort.port!)")
-            }
-        }
-    }
-}
-
-extension UTMCtl {
     struct File: ParsableCommand {
         static var configuration = CommandConfiguration(
             abstract: "Guest agent file operations.",
@@ -519,6 +477,9 @@ extension UTMCtl {
         func run(with application: UTMScriptingApplication) throws {
             let vm = try virtualMachine(forIdentifier: identifer, in: application)
             let file = vm.openFileAt!(path, for: .reading, updating: false)
+            guard !EventErrorHandler.shared.hasFailed else {
+                throw ExitCode.failure
+            }
             var data: Data
             repeat {
                 let text = file.readAtOffset!(0, from: .currentPosition, forLength: 4096, base64Encoding: true, closing: false)
@@ -545,6 +506,9 @@ extension UTMCtl {
         func run(with application: UTMScriptingApplication) throws {
             let vm = try virtualMachine(forIdentifier: identifer, in: application)
             let file = vm.openFileAt!(path, for: .writing, updating: false)
+            guard !EventErrorHandler.shared.hasFailed else {
+                throw ExitCode.failure
+            }
             var data: Data
             repeat {
                 data = try FileHandle.standardInput.read(upToCount: 4096) ?? Data()
@@ -586,17 +550,37 @@ extension UTMCtl {
                 data = Data()
             }
             let process = vm.executeAt!(path, withArguments: args, withEnvironment: env, usingInput: data.base64EncodedString(), base64Encoding: true, outputCapturing: true)
+            guard !EventErrorHandler.shared.hasFailed else {
+                throw ExitCode.failure
+            }
             var result: [AnyHashable: Any]
-            repeat {
+            var delay: TimeInterval = 0.01
+            while true {
                 result = process.getResult!()
-            } while result["hasExited"] as? Bool == false
+                guard !EventErrorHandler.shared.hasFailed else {
+                    throw ExitCode.failure
+                }
+                // the record is keyed by the sdef property names, not the Cocoa keys
+                guard let exited = result["exited"] as? Bool else {
+                    throw UTMCtl.APIError.unexpectedResult
+                }
+                if exited {
+                    break
+                }
+                Thread.sleep(forTimeInterval: delay)
+                delay = min(delay * 2, 1)
+            }
             let exitCode = result["exitCode"] as? Int ?? 0
+            let signalCode = result["signalCode"] as? Int ?? 0
             let outputData = result["outputData"] as? String ?? ""
             let errorData = result["errorData"] as? String ?? ""
             try FileHandle.standardOutput.write(contentsOf: Data(base64Encoded: outputData) ?? Data())
             try FileHandle.standardError.write(contentsOf: Data(base64Encoded: errorData) ?? Data())
-            if exitCode != 0 {
-                Darwin.exit(Int32(exitCode))
+            let status = exitCode != 0 ? exitCode : (signalCode != 0 ? 128 + signalCode : 0)
+            if status != 0 {
+                // the shell sees only the low 8 bits, so keep a failure from reading as success
+                let lowBits = Int32(truncatingIfNeeded: status & 0xFF)
+                Darwin.exit(lowBits != 0 ? lowBits : 1)
             }
         }
     }
